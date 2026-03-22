@@ -94,8 +94,24 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     idas = [r for r in parsed if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"]
     voltas = [r for r in parsed if str(r.get("destination", "")).upper() == "PVH"]
 
-    idas_ok = sorted([r for r in idas if r.get("price") is not None], key=_price_num)
-    voltas_ok = sorted([r for r in voltas if r.get("price") is not None], key=_price_num)
+    def _dedupe_sorted_rows(rows: list[dict]) -> list[dict]:
+        seen = set()
+        result = []
+        for row in rows:
+            key = (
+                str(row.get("origin", "")).upper(),
+                str(row.get("destination", "")).upper(),
+                row.get("outbound_date", ""),
+                row.get("inbound_date", "") or "",
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(row)
+        return result
+
+    idas_ok = _dedupe_sorted_rows(sorted([r for r in idas if r.get("price") is not None], key=_price_num))
+    voltas_ok = _dedupe_sorted_rows(sorted([r for r in voltas if r.get("price") is not None], key=_price_num))
 
     lines = [
         "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",

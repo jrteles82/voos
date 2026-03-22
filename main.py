@@ -87,7 +87,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
 
     if not parsed:
         return (
-            "────────── ✈️ CONSULTA COMPLETA ✈️ ──────────\n"
+            "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -\n"
             "Sem dados nesta execução."
         )
 
@@ -98,7 +98,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     voltas_ok = sorted([r for r in voltas if r.get("price") is not None], key=_price_num)
 
     lines = [
-        "────────── ✈️ CONSULTA COMPLETA ✈️ ──────────",
+        "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",
         f"Execução: {trigger}",
         "",
         "IDAS (PVH -> destino):",

@@ -456,6 +456,12 @@ class GoogleFlightsScraper:
                 if loc.count() > 0:
                     loc.first.click(timeout=4000)
                     self._wait_briefly_for_results(page)
+                    try:
+                        current = loc.first.inner_text(timeout=1500)
+                    except Exception:
+                        current = ""
+                    if "R$" in (current or ""):
+                        return True
                     return True
             except Exception:
                 pass
@@ -471,12 +477,22 @@ class GoogleFlightsScraper:
 
     def _extract_visible_flight_cards(self, page) -> list[dict]:
         cards = []
-        selectors = ["[role='listitem']", "li", "div[jscontroller]", "div[role='button']"]
+        selectors = [
+            "[role='main'] [role='listitem']",
+            "[role='main'] li",
+            "[role='main'] div[jscontroller]",
+            "[role='main'] div[role='button']",
+            "[role='listitem']",
+            "li",
+            "div[jscontroller]",
+            "div[role='button']",
+        ]
+        seen = set()
 
         for sel in selectors:
             try:
                 loc = page.locator(sel)
-                count = min(loc.count(), 140)
+                count = min(loc.count(), 220)
                 for i in range(count):
                     card = loc.nth(i)
                     try:
@@ -499,19 +515,23 @@ class GoogleFlightsScraper:
                     if not parsed_prices:
                         continue
 
+                    card_price = min(parsed_prices)
+                    key = (round(card_price, 2), txt[:200])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
                     cards.append({
                         "selector": sel,
                         "index": i,
-                        "price": min(parsed_prices),
+                        "price": card_price,
                         "prices": parsed_prices,
                         "text": txt[:400],
                         "loc": card,
                     })
             except Exception:
                 pass
-            if cards:
-                break
-        return cards
+        return sorted(cards, key=lambda item: item.get("price") if item.get("price") is not None else 10**12)
 
     def _sort_candidate_cards(self, cards: list[dict], summary_price: float | None) -> list[dict]:
         def _score(item: dict):
@@ -633,13 +653,6 @@ class GoogleFlightsScraper:
         for idx, line in enumerate(lines):
             low = line.lower()
             prices = re.findall(r"R\$\s*([\d\.]+(?:,\d{2})?)", line)
-            if not prices:
-                continue
-            try:
-                price = float(prices[-1].replace('.', '').replace(',', '.'))
-            except Exception:
-                continue
-
             vendor = ""
             context = " ".join(lines[max(0, idx - 1): min(len(lines), idx + 2)])
             for name in known_vendors:
@@ -652,7 +665,24 @@ class GoogleFlightsScraper:
                 if m:
                     vendor = m.group(1).strip(" :-")
 
-            if vendor:
+            if prices:
+                try:
+                    price = float(prices[-1].replace('.', '').replace(',', '.'))
+                except Exception:
+                    continue
+            else:
+                price = None
+                for probe in lines[idx + 1: min(len(lines), idx + 4)]:
+                    probe_prices = re.findall(r"R\$\s*([\d\.]+(?:,\d{2})?)", probe)
+                    if not probe_prices:
+                        continue
+                    try:
+                        price = float(probe_prices[-1].replace('.', '').replace(',', '.'))
+                        break
+                    except Exception:
+                        continue
+
+            if vendor and price is not None:
                 options.append({"vendor": vendor.strip(), "price": price})
 
         dedup = []
@@ -664,6 +694,29 @@ class GoogleFlightsScraper:
                 dedup.append(item)
         return dedup
 
+    def _extract_booking_total_price(self, page) -> float | None:
+        patterns = [
+            r"Menor preço total\s*R\$\s*([\d\.]+(?:,\d{2})?)",
+            r"Menor preço total.*?R\$\s*([\d\.]+(?:,\d{2})?)",
+            r"Menores preços\s+a partir de\s+R\$\s*([\d\.]+(?:,\d{2})?)",
+        ]
+        for sel in ["body", "main", "[role='main']"]:
+            try:
+                txt = page.locator(sel).first.inner_text(timeout=4000)
+            except Exception:
+                continue
+            if not txt:
+                continue
+            for pattern in patterns:
+                m = re.search(pattern, txt, flags=re.IGNORECASE | re.DOTALL)
+                if not m:
+                    continue
+                try:
+                    return float(m.group(1).replace(".", "").replace(",", "."))
+                except Exception:
+                    pass
+        return None
+
     def _extract_booking_options(self, page) -> tuple[str, float | None, list[dict]]:
         blocks = self._collect_booking_text_blocks(page)
         options = []
@@ -674,11 +727,15 @@ class GoogleFlightsScraper:
             try:
                 body = page.locator("body").inner_text(timeout=7000)
             except Exception:
-                return "", None, []
+                total_price = self._extract_booking_total_price(page)
+                return "", total_price, []
             for pattern in [
-                r"Reserve com a\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
-                r"Reservar com\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
+                r"Reserve com(?: a)?\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
+                r"Reservar com(?: a)?\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
+                r"Comprar com(?: a)?\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
                 r"Vendido por\s+([^\n\r]+?)\s+R\$\s*([\d\.]+(?:,\d{2})?)",
+                r"Reserve com(?: a)?\s+([^\n\r]+?)[\s\S]{0,120}?R\$\s*([\d\.]+(?:,\d{2})?)",
+                r"Reservar com(?: a)?\s+([^\n\r]+?)[\s\S]{0,120}?R\$\s*([\d\.]+(?:,\d{2})?)",
             ]:
                 for vendor, raw_price in re.findall(pattern, body, flags=re.IGNORECASE):
                     try:
@@ -699,10 +756,14 @@ class GoogleFlightsScraper:
                 seen.add(key)
                 cleaned.append({"vendor": vendor, "price": price})
 
+        booking_total_price = self._extract_booking_total_price(page)
         if not cleaned:
-            return "", None, []
+            return "", booking_total_price, []
         best = sorted(cleaned, key=lambda x: x["price"])[0]
-        return best["vendor"], best["price"], cleaned
+        best_price = best["price"]
+        if booking_total_price is not None:
+            best_price = min(best_price, booking_total_price)
+        return best["vendor"], best_price, cleaned
 
     def search(self, route: RouteQuery) -> FlightResult:
         context = getattr(self.browser, "new_context", None)
@@ -753,6 +814,8 @@ class GoogleFlightsScraper:
                     if best_vendor:
                         notes.append(f"booking_best_price_card_{idx}={format_brl(best_vendor_price)}")
                         break
+                    if best_vendor_price is not None:
+                        notes.append(f"booking_total_sem_vendor_card_{idx}={format_brl(best_vendor_price)}")
                     notes.append(f"booking_sem_vendor_no_card={idx}")
                     try:
                         page.go_back(wait_until="domcontentloaded")
@@ -770,17 +833,31 @@ class GoogleFlightsScraper:
                 notes.append(f"melhor_vendedor={best_vendor} ({format_brl(best_vendor_price)})")
                 notes.append(f"opcoes_reserva={len(booking_options)}")
 
-            candidates = []
-            if summary_price is not None:
-                candidates.append(("summary", summary_price))
-            if visible_min_price is not None:
-                candidates.append(("visible_list", visible_min_price))
-            if best_vendor_price is not None:
-                candidates.append(("booking", best_vendor_price))
+            summary_matches_visible = False
+            if summary_price is not None and visible_min_price is not None:
+                summary_matches_visible = abs(summary_price - visible_min_price) < 0.01
+                if not summary_matches_visible:
+                    notes.append(
+                        f"summary_visible_mismatch={format_brl(summary_price)}!={format_brl(visible_min_price)}"
+                    )
 
-            if candidates:
-                source, final_price = min(candidates, key=lambda item: item[1])
-                notes.append(f"final_price_source={source}")
+            if best_vendor_price is not None and visible_min_price is not None and abs(best_vendor_price - visible_min_price) >= 0.01:
+                notes.append(
+                    f"booking_visible_mismatch={format_brl(best_vendor_price)}!={format_brl(visible_min_price)}"
+                )
+
+            # Regra do usuário: sempre preferir o menor valor visível na busca.
+            # O booking/vendedor fica como detalhe complementar, porque pode refletir
+            # outra etapa do fluxo e não o menor preço mostrado na tela principal.
+            if visible_min_price is not None:
+                final_price = visible_min_price
+                notes.append("final_price_source=visible_list")
+            elif summary_price is not None:
+                final_price = summary_price
+                notes.append("final_price_source=summary_fallback")
+            elif best_vendor_price is not None:
+                final_price = best_vendor_price
+                notes.append("final_price_source=booking_fallback")
             elif ranked_cards:
                 final_price = ranked_cards[0].get("price")
                 notes.append("final_price_source=ranked_fallback")

@@ -1,0 +1,49 @@
+{
+  "ok": false,
+  "motivo": "Nao encontrou o botao de busca",
+  "inputs_visiveis": [
+    {
+      "indice": 0,
+      "placeholder": null,
+      "aria_label": null,
+      "type": "checkbox"
+    },
+    {
+      "indice": 1,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    },
+    {
+      "indice": 2,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    },
+    {
+      "indice": 3,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    },
+    {
+      "indice": 4,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    },
+    {
+      "indice": 5,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    },
+    {
+      "indice": 6,
+      "placeholder": " ",
+      "aria_label": null,
+      "type": null
+    }
+  ],
+  "url_final": "https://www.maxmilhas.com.br/passagens-aereas"
+}

@@ -48,6 +48,11 @@
         return `R$ ${n.toFixed(2).replace('.', ',')}`;
       }
 
+      function priceTextClass(value) {
+        const n = value === null || value === undefined || value === '' ? Number.NaN : Number(value);
+        return Number.isFinite(n) && n <= 1000 ? 'text-success fw-bold' : '';
+      }
+
       function trajetoFromDestination(destination) {
         return String(destination || '').trim().toUpperCase() === 'PVH'
           ? 'Volta → PVH'
@@ -206,7 +211,7 @@
               <tr>
                 <td>${safe(rota.origin)} → ${safe(rota.destination)}</td>
                 <td>${dataVoo}</td>
-                <td>${preco}</td>
+                <td class="${priceTextClass(r.price)}">${preco}</td>
                 <td>${melhorCompra}</td>
                 <td>${safe(r.site)}</td>
                 <td>${safe(r.final_price_source)}</td>
@@ -286,7 +291,7 @@
 <tr>
 <td>${safe(item.origin)} → ${safe(item.destination)}</td>
 <td>${safe(item.inbound_date) ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : `${safe(item.outbound_date)}`}</td>
-<td>${safe(item.price_fmt, 'Sem preço')}</td>
+<td class="${priceTextClass(item.price)}">${safe(item.price_fmt, 'Sem preço')}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
 <td>${safe(item.final_price_source)}</td>
@@ -303,7 +308,7 @@
 <tr>
 <td>${safe(item.origin)} → ${safe(item.destination)}</td>
 <td>${safe(item.inbound_date) ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : `${safe(item.outbound_date)}`}</td>
-<td>${safe(item.price_fmt, 'Sem preço')}</td>
+<td class="${priceTextClass(item.price)}">${safe(item.price_fmt, 'Sem preço')}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
 <td>${safe(item.final_price_source)}</td>
@@ -407,7 +412,7 @@
 <tr>
 <td>${rota}</td>
 <td>${dataVoo}</td>
-<td>${preco}</td>
+<td class="${priceTextClass(item.price)}">${preco}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
 <td>${safe(item.final_price_source)}</td>
@@ -427,7 +432,7 @@
 <tr>
 <td>${rota}</td>
 <td>${dataVoo}</td>
-<td>${preco}</td>
+<td class="${priceTextClass(item.price)}">${preco}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
 <td>${safe(item.final_price_source)}</td>

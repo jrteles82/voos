@@ -78,6 +78,15 @@ def limpar_arquivos_debug():
             warn(f"Falha removendo arquivo de debug {nome}: {e}")
 
 
+def montar_parametros_consulta(origem: str, destino: str, data_ida_iso: str) -> dict:
+    return {
+        "origem": (origem or ORIGEM).upper(),
+        "destino": (destino or DESTINO).upper(),
+        "data_ida": data_ida_iso or DATA_IDA_ISO,
+        "url_base": URL,
+    }
+
+
 def normalizar_preco(texto: str):
     m = re.search(r"R\$\s*([\d\.\,]+)", texto)
     if not m:
@@ -296,17 +305,17 @@ def preencher_data_ida(page, data_iso: str):
     return False
 
 
-def preencher_campos(page):
+def preencher_campos(page, origem: str, destino: str, data_ida_iso: str):
     try:
         obter_inputs_texto_visiveis(page)
 
-        preencher_origem_destino_por_id(page, "#from", ORIGEM, "origem")
+        preencher_origem_destino_por_id(page, "#from", origem, "origem")
         page.wait_for_timeout(800)
 
-        preencher_origem_destino_por_id(page, "#to", DESTINO, "destino")
+        preencher_origem_destino_por_id(page, "#to", destino, "destino")
         page.wait_for_timeout(800)
 
-        if not preencher_data_ida(page, DATA_IDA_ISO):
+        if not preencher_data_ida(page, data_ida_iso):
             return {
                 "ok": False,
                 "motivo": "Não conseguiu preencher a data"
@@ -324,7 +333,7 @@ def preencher_campos(page):
         }
 
 
-def pagina_tem_resultado(page):
+def pagina_tem_resultado(page, url_base: str = URL):
     try:
         texto = page.locator("body").inner_text(timeout=10000).lower()
 
@@ -340,7 +349,7 @@ def pagina_tem_resultado(page):
             "filtrar",
         ]
 
-        url_mudou = page.url != URL
+        url_mudou = page.url != url_base
         encontrou_sinal = any(s in texto for s in sinais_resultado)
         encontrou_preco = bool(re.search(r"R\$\s*[\d\.\,]+", texto))
 
@@ -349,11 +358,11 @@ def pagina_tem_resultado(page):
         return False
 
 
-def construir_url_busca():
-    return f"https://www.maxmilhas.com.br/busca-passagens-aereas/OW/{ORIGEM}/{DESTINO}/{DATA_IDA_ISO}/1/0/0/EC"
+def construir_url_busca(origem: str, destino: str, data_ida_iso: str):
+    return f"https://www.maxmilhas.com.br/busca-passagens-aereas/OW/{origem}/{destino}/{data_ida_iso}/1/0/0/EC"
 
 
-def clicar_buscar(page):
+def clicar_buscar(page, origem: str, destino: str, data_ida_iso: str, url_base: str = URL):
     log("Tentando disparar busca...")
     fechar_popups(page)
     page.wait_for_timeout(500)
@@ -367,11 +376,11 @@ def clicar_buscar(page):
             ultimo_input.press("Enter")
             page.wait_for_timeout(4000)
 
-            if page.url != URL:
+            if page.url != url_base:
                 log("Busca disparada com Enter no último input.")
                 return True
 
-            if pagina_tem_resultado(page):
+            if pagina_tem_resultado(page, url_base=url_base):
                 log("Busca disparada com Enter no último input.")
                 return True
     except Exception as e:
@@ -381,7 +390,7 @@ def clicar_buscar(page):
         page.keyboard.press("Enter")
         page.wait_for_timeout(4000)
 
-        if page.url != URL or pagina_tem_resultado(page):
+        if page.url != url_base or pagina_tem_resultado(page, url_base=url_base):
             log("Busca disparada com Enter global.")
             return True
     except Exception as e:
@@ -408,7 +417,7 @@ def clicar_buscar(page):
                     loc.click(timeout=5000, force=True)
                 page.wait_for_timeout(5000)
 
-                if page.url != URL or pagina_tem_resultado(page):
+                if page.url != url_base or pagina_tem_resultado(page, url_base=url_base):
                     return True
         except Exception:
             pass
@@ -426,7 +435,7 @@ def clicar_buscar(page):
                     loc.click(timeout=5000, force=True)
                 page.wait_for_timeout(5000)
 
-                if page.url != URL or pagina_tem_resultado(page):
+                if page.url != url_base or pagina_tem_resultado(page, url_base=url_base):
                     return True
         except Exception:
             pass
@@ -454,11 +463,11 @@ def clicar_buscar(page):
         warn(f"Falha no submit JS: {e}")
 
     try:
-        url_busca = construir_url_busca()
+        url_busca = construir_url_busca(origem, destino, data_ida_iso)
         log(f"Navegando direto para URL de busca: {url_busca}")
         page.goto(url_busca, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(8000)
-        if page.url != URL or pagina_tem_resultado(page):
+        if page.url != url_base or pagina_tem_resultado(page, url_base=url_base):
             return True
     except Exception as e:
         warn(f"Falha navegando direto para a URL de busca: {e}")
@@ -478,10 +487,10 @@ def extrair_precos(page):
         return []
 
 
-def criar_browser(p):
+def criar_browser(p, headless: bool = HEADLESS, timeout_padrao: int = TIMEOUT_PADRAO):
     return p.chromium.launch(
-        headless=HEADLESS,
-        timeout=TIMEOUT_PADRAO,
+        headless=headless,
+        timeout=timeout_padrao,
         args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
@@ -503,75 +512,98 @@ def criar_context(browser):
     )
 
 
-def executar_uma_tentativa(tentativa: int):
+def _executar_uma_tentativa_com_playwright(
+    p,
+    tentativa: int,
+    origem: str,
+    destino: str,
+    data_ida_iso: str,
+    *,
+    headless: bool = HEADLESS,
+    timeout_padrao: int = TIMEOUT_PADRAO,
+):
     browser = None
     context = None
+    params = montar_parametros_consulta(origem, destino, data_ida_iso)
 
     try:
         log(f"=== Tentativa {tentativa}/{MAX_TENTATIVAS} ===")
+        browser = criar_browser(p, headless=headless, timeout_padrao=timeout_padrao)
+        context = criar_context(browser)
+        page = context.new_page()
 
-        with sync_playwright() as p:
-            browser = criar_browser(p)
-            context = criar_context(browser)
-            page = context.new_page()
+        page.goto(params["url_base"], wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
 
-            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(5000)
+        log(f"Título: {page.title()}")
+        log(f"URL atual: {page.url}")
 
-            log(f"Título: {page.title()}")
-            log(f"URL atual: {page.url}")
+        fechar_popups(page)
+        page.wait_for_timeout(1000)
 
-            fechar_popups(page)
-            page.wait_for_timeout(1000)
+        salvar_debug(page, f"debug_inicio_t{tentativa}")
 
-            salvar_debug(page, f"debug_inicio_t{tentativa}")
-
-            preenchimento = preencher_campos(page)
-            if not preenchimento["ok"]:
-                salvar_debug(page, f"debug_campos_falha_t{tentativa}", salvar_pagina_html=True)
-                return {
-                    "ok": False,
-                    "motivo": preenchimento["motivo"],
-                    "url_final": page.url,
-                    "timestamp": datetime.now().isoformat(),
-                }
-
-            salvar_debug(page, f"debug_campos_t{tentativa}")
-
-            buscou = clicar_buscar(page)
-            if not buscou:
-                salvar_debug(page, f"debug_sem_busca_t{tentativa}", salvar_pagina_html=True)
-                return {
-                    "ok": False,
-                    "motivo": "Não encontrou botão de busca",
-                    "url_final": page.url,
-                    "timestamp": datetime.now().isoformat(),
-                }
-
-            page.wait_for_timeout(10000)
-            salvar_debug(page, f"debug_resultados_t{tentativa}", salvar_pagina_html=True)
-
-            if not pagina_tem_resultado(page):
-                return {
-                    "ok": False,
-                    "motivo": "Página não aparenta ser de resultados",
-                    "url_final": page.url,
-                    "timestamp": datetime.now().isoformat(),
-                }
-
-            precos = extrair_precos(page)
-
+        preenchimento = preencher_campos(page, params["origem"], params["destino"], params["data_ida"])
+        if not preenchimento["ok"]:
+            salvar_debug(page, f"debug_campos_falha_t{tentativa}", salvar_pagina_html=True)
             return {
-                "ok": len(precos) > 0,
-                "motivo": None if precos else "Nenhum preço válido encontrado",
-                "origem": ORIGEM,
-                "destino": DESTINO,
-                "data_ida": DATA_IDA_ISO,
+                "ok": False,
+                "motivo": preenchimento["motivo"],
+                "origem": params["origem"],
+                "destino": params["destino"],
+                "data_ida": params["data_ida"],
                 "url_final": page.url,
-                "precos_encontrados": precos,
-                "menor_preco": min(precos) if precos else None,
                 "timestamp": datetime.now().isoformat(),
             }
+
+        salvar_debug(page, f"debug_campos_t{tentativa}")
+
+        buscou = clicar_buscar(
+            page,
+            params["origem"],
+            params["destino"],
+            params["data_ida"],
+            url_base=params["url_base"],
+        )
+        if not buscou:
+            salvar_debug(page, f"debug_sem_busca_t{tentativa}", salvar_pagina_html=True)
+            return {
+                "ok": False,
+                "motivo": "Não encontrou botão de busca",
+                "origem": params["origem"],
+                "destino": params["destino"],
+                "data_ida": params["data_ida"],
+                "url_final": page.url,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        page.wait_for_timeout(10000)
+        salvar_debug(page, f"debug_resultados_t{tentativa}", salvar_pagina_html=True)
+
+        if not pagina_tem_resultado(page, url_base=params["url_base"]):
+            return {
+                "ok": False,
+                "motivo": "Página não aparenta ser de resultados",
+                "origem": params["origem"],
+                "destino": params["destino"],
+                "data_ida": params["data_ida"],
+                "url_final": page.url,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        precos = extrair_precos(page)
+
+        return {
+            "ok": len(precos) > 0,
+            "motivo": None if precos else "Nenhum preço válido encontrado",
+            "origem": params["origem"],
+            "destino": params["destino"],
+            "data_ida": params["data_ida"],
+            "url_final": page.url,
+            "precos_encontrados": precos,
+            "menor_preco": min(precos) if precos else None,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     except PlaywrightTimeoutError as e:
         return {
@@ -599,32 +631,82 @@ def executar_uma_tentativa(tentativa: int):
             pass
 
 
-def buscar_menor_preco():
+def executar_uma_tentativa(
+    tentativa: int,
+    origem: str = ORIGEM,
+    destino: str = DESTINO,
+    data_ida_iso: str = DATA_IDA_ISO,
+    *,
+    playwright=None,
+    headless: bool = HEADLESS,
+    timeout_padrao: int = TIMEOUT_PADRAO,
+):
+    if playwright is not None:
+        return _executar_uma_tentativa_com_playwright(
+            playwright,
+            tentativa,
+            origem,
+            destino,
+            data_ida_iso,
+            headless=headless,
+            timeout_padrao=timeout_padrao,
+        )
+
+    with sync_playwright() as p:
+        return _executar_uma_tentativa_com_playwright(
+            p,
+            tentativa,
+            origem,
+            destino,
+            data_ida_iso,
+            headless=headless,
+            timeout_padrao=timeout_padrao,
+        )
+
+
+def buscar_menor_preco(
+    origem: str = ORIGEM,
+    destino: str = DESTINO,
+    data_ida_iso: str = DATA_IDA_ISO,
+    *,
+    playwright=None,
+    salvar_arquivo_json: bool = True,
+):
     ultimo_resultado = None
 
     limpar_arquivos_debug()
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
-        resultado = executar_uma_tentativa(tentativa)
+        resultado = executar_uma_tentativa(
+            tentativa,
+            origem=origem,
+            destino=destino,
+            data_ida_iso=data_ida_iso,
+            playwright=playwright,
+        )
         ultimo_resultado = resultado
 
         if resultado.get("ok"):
-            salvar_json(resultado)
-            print("\n========== RESULTADO ==========")
-            print(f"Rota: {resultado['origem']} -> {resultado['destino']}")
-            print(f"Data: {resultado['data_ida']}")
-            print(f"Menor preço: R$ {resultado['menor_preco']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            print(f"Preços encontrados: {resultado['precos_encontrados']}")
-            print(f"URL final: {resultado['url_final']}")
-            print("===============================\n")
+            if salvar_arquivo_json:
+                salvar_json(resultado)
+            if playwright is None:
+                print("\n========== RESULTADO ==========")
+                print(f"Rota: {resultado['origem']} -> {resultado['destino']}")
+                print(f"Data: {resultado['data_ida']}")
+                print(f"Menor preço: R$ {resultado['menor_preco']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+                print(f"Preços encontrados: {resultado['precos_encontrados']}")
+                print(f"URL final: {resultado['url_final']}")
+                print("===============================\n")
             return resultado
 
         warn(f"Tentativa {tentativa} falhou: {resultado.get('motivo', 'Sem detalhe')}")
         if tentativa < MAX_TENTATIVAS:
             time.sleep(3)
 
-    salvar_json(ultimo_resultado or {"ok": False, "motivo": "Sem resultado"})
-    print("\nFalhou após todas as tentativas.\n")
+    if salvar_arquivo_json:
+        salvar_json(ultimo_resultado or {"ok": False, "motivo": "Sem resultado"})
+    if playwright is None:
+        print("\nFalhou após todas as tentativas.\n")
     return ultimo_resultado
 
 

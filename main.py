@@ -27,6 +27,7 @@ from skyscanner import (
     parse_price_brl,
     sync_playwright,
 )
+from maxmilhas import buscar_menor_preco as buscar_menor_preco_maxmilhas
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SKYSCANNER_SECRET_KEY", "dev-change-this-secret")
@@ -103,6 +104,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
                 str(row.get("destination", "")).upper(),
                 row.get("outbound_date", ""),
                 row.get("inbound_date", "") or "",
+                str(row.get("site", "")).lower(),
             )
             if key in seen:
                 continue
@@ -174,6 +176,82 @@ def _build_user_routes(conn, user_id: int) -> list[RouteQuery]:
     return routes
 
 
+def _result_to_row(result: FlightResult, price_band: str) -> dict:
+    return {
+        "origin": result.origin,
+        "destination": result.destination,
+        "outbound_date": result.outbound_date,
+        "inbound_date": result.inbound_date,
+        "trip_type": result.trip_type,
+        "price": result.price,
+        "price_fmt": format_brl(result.price),
+        "site": result.site,
+        "currency": result.currency,
+        "url": result.url,
+        "notes": result.notes,
+        "price_band": price_band,
+        "best_vendor": getattr(result, "best_vendor", ""),
+        "best_vendor_price": getattr(result, "best_vendor_price", None),
+        "final_price_source": extract_final_price_source(result.notes),
+    }
+
+
+def _search_google_result(scraper: GoogleFlightsScraper, route: RouteQuery) -> FlightResult:
+    return scraper.search(route)
+
+
+def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | None:
+    if (route.inbound_date or "").strip():
+        return None
+
+    resultado = buscar_menor_preco_maxmilhas(
+        origem=route.origin,
+        destino=route.destination,
+        data_ida_iso=route.outbound_date,
+        playwright=playwright,
+        salvar_arquivo_json=False,
+    )
+
+    ok = bool(resultado and resultado.get("ok"))
+    menor_preco = resultado.get("menor_preco") if resultado else None
+    vendedor = "MaxMilhas" if ok and menor_preco is not None else ""
+    notes_parts = []
+    if resultado:
+        if resultado.get("motivo"):
+            notes_parts.append(f"motivo={resultado['motivo']}")
+        if resultado.get("url_final"):
+            notes_parts.append(f"url_final={resultado['url_final']}")
+        if ok and menor_preco is not None:
+            notes_parts.append("final_price_source=maxmilhas")
+            notes_parts.append(f"precos={resultado.get('precos_encontrados', [])}")
+
+    return FlightResult(
+        site="maxmilhas",
+        origin=route.origin,
+        destination=route.destination,
+        outbound_date=route.outbound_date,
+        inbound_date=route.inbound_date,
+        trip_type=route.trip_type,
+        price=menor_preco if ok else None,
+        currency="BRL",
+        url=(resultado or {}).get("url_final", ""),
+        notes=" | ".join(notes_parts),
+        best_vendor=vendedor,
+        best_vendor_price=menor_preco if ok else None,
+        booking_options_json=json.dumps(
+            [{"vendor": "MaxMilhas", "price": menor_preco}] if ok and menor_preco is not None else [],
+            ensure_ascii=False,
+        ),
+    )
+
+
+def _store_result(db: Database, route: RouteQuery, result: FlightResult) -> dict:
+    min_price, avg_price, _last_price = db.stats_for(route)
+    band = classify_price(result.price, min_price, avg_price)
+    db.save(result, band)
+    return _result_to_row(result, band)
+
+
 def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
     db = Database(get_db_path())
     parsed = []
@@ -190,32 +268,22 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
             scraper = GoogleFlightsScraper(browser)
 
             idx = 0
-            total = len(routes)
+            total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
             for route in routes:
-                # Google
-                result = scraper.search(route)
-                min_price, avg_price, _last_price = db.stats_for(route)
-                band = classify_price(result.price, min_price, avg_price)
-                db.save(result, band)
-                row = {
-                    "origin": result.origin,
-                    "destination": result.destination,
-                    "outbound_date": result.outbound_date,
-                    "inbound_date": result.inbound_date,
-                    "trip_type": result.trip_type,
-                    "price": result.price,
-                    "price_fmt": format_brl(result.price),
-                    "site": result.site,
-                    "notes": result.notes,
-                    "price_band": band,
-                    "best_vendor": getattr(result, "best_vendor", ""),
-                    "best_vendor_price": getattr(result, "best_vendor_price", None),
-                    "final_price_source": extract_final_price_source(result.notes),
-                }
-                parsed.append(row)
+                google_result = _search_google_result(scraper, route)
+                google_row = _store_result(db, route, google_result)
+                parsed.append(google_row)
                 idx += 1
                 if on_row:
-                    on_row(idx, total, row)
+                    on_row(idx, total, google_row)
+
+                maxmilhas_result = _search_maxmilhas_result(p, route)
+                if maxmilhas_result is not None:
+                    maxmilhas_row = _store_result(db, route, maxmilhas_result)
+                    parsed.append(maxmilhas_row)
+                    idx += 1
+                    if on_row:
+                        on_row(idx, total, maxmilhas_row)
             browser.close()
 
     return parsed
@@ -457,6 +525,18 @@ def _to_route(query_args) -> RouteQuery:
     )
 
 
+def _resolve_requested_sources(query_args, route: RouteQuery) -> list[str]:
+    fonte = (query_args.get("fonte") or "").strip().lower()
+    if fonte in {"maxmilhas"}:
+        return [] if (route.inbound_date or "").strip() else ["maxmilhas"]
+    if fonte in {"google", "google_flights"}:
+        return ["google_flights"]
+    sources = ["google_flights"]
+    if not (route.inbound_date or "").strip():
+        sources.append("maxmilhas")
+    return sources
+
+
 @app.route("/", methods=["GET"])
 def index():
     if session.get("user_id"):
@@ -504,33 +584,58 @@ def consulta():
         return jsonify({"error": str(exc)}), 400
 
     db = Database(get_db_path())
+    requested_sources = _resolve_requested_sources(request.args, route)
+    if not requested_sources:
+        return jsonify({"error": "A MaxMilhas atualmente só está habilitada para consultas somente ida."}), 400
 
+    results = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=bool(CONFIG.get("headless", True)))
-        scraper = GoogleFlightsScraper(browser)
-        result = scraper.search(route)
-        browser.close()
+        browser = None
+        scraper = None
+        if "google_flights" in requested_sources:
+            browser = p.chromium.launch(headless=bool(CONFIG.get("headless", True)))
+            scraper = GoogleFlightsScraper(browser)
 
+        try:
+            for source in requested_sources:
+                if source == "google_flights":
+                    result = _search_google_result(scraper, route)
+                else:
+                    result = _search_maxmilhas_result(p, route)
+
+                if result is None:
+                    continue
+
+                row = _store_result(db, route, result)
+                results.append(row)
+        finally:
+            if browser:
+                browser.close()
+
+    if not results:
+        return jsonify({"error": "Nenhum resultado foi retornado para a rota consultada."}), 502
+
+    chosen = min(
+        results,
+        key=lambda item: item["price"] if isinstance(item.get("price"), (int, float)) and item.get("price") is not None else 10**12,
+    )
     min_price, avg_price, last_price = db.stats_for(route)
-    band = classify_price(result.price, min_price, avg_price)
-    db.save(result, band)
 
     try:
-        vendor_line = ""
-        if getattr(result, "best_vendor", ""):
-            vendor_price = format_brl(getattr(result, "best_vendor_price", None))
-            vendor_line = f"\nOnde comprar mais barato: {result.best_vendor} ({vendor_price})"
-
+        detalhes = []
+        for item in results:
+            vendor_line = ""
+            if item.get("best_vendor"):
+                vendor_line = f" | comprar: {item['best_vendor']} ({format_brl(item.get('best_vendor_price'))})"
+            detalhes.append(f"{item['site']}: {item['price_fmt']}{vendor_line}")
         resumo = (
             "────────── ✈️ CONSULTA RÁPIDA ✈️ ──────────\n"
             f"Rota: {route.origin} → {route.destination}\n"
             f"Data: {route.outbound_date}\n"
             + (f" / {route.inbound_date}" if route.inbound_date else "")
             + "\n"
-            + f"Preço: {format_brl(result.price)}\n"
-            + f"Classificação: {band}\n"
-            + f"Fonte: {result.site}\n"
-            + vendor_line
+            + "Resultados:\n"
+            + "\n".join(detalhes)
         )
         send_telegram_message(resumo)
     except Exception:
@@ -546,17 +651,18 @@ def consulta():
                 "trip_type": route.trip_type,
             },
             "resultado": {
-                "price": result.price,
-                "price_fmt": format_brl(result.price),
-                "price_band": band,
-                "site": result.site,
-                "currency": result.currency,
-                "url": result.url,
-                "notes": result.notes,
-                "best_vendor": getattr(result, "best_vendor", ""),
-                "best_vendor_price": getattr(result, "best_vendor_price", None),
-                "final_price_source": extract_final_price_source(result.notes),
+                "price": chosen["price"],
+                "price_fmt": chosen["price_fmt"],
+                "price_band": chosen["price_band"],
+                "site": chosen["site"],
+                "currency": "BRL",
+                "url": chosen.get("url", ""),
+                "notes": chosen["notes"],
+                "best_vendor": chosen["best_vendor"],
+                "best_vendor_price": chosen["best_vendor_price"],
+                "final_price_source": chosen["final_price_source"],
             },
+            "resultados": results,
             "historico": {
                 "min_price": min_price,
                 "avg_price": avg_price,
@@ -613,7 +719,7 @@ def cron():
 def cron_stream():
     def event_stream():
         routes = build_db_queries(get_db_path())
-        total = len(routes)
+        total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
         yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
         # evita concorrência com auto-scan/execuções manuais
@@ -629,30 +735,20 @@ def cron_stream():
                 scraper = GoogleFlightsScraper(browser)
 
                 for idx, route in enumerate(routes, start=1):
-                    result = scraper.search(route)
-                    min_price, avg_price, _last_price = db.stats_for(route)
-                    band = classify_price(result.price, min_price, avg_price)
-                    db.save(result, band)
-
-                    row = {
-                        "origin": result.origin,
-                        "destination": result.destination,
-                        "outbound_date": result.outbound_date,
-                        "inbound_date": result.inbound_date,
-                        "trip_type": result.trip_type,
-                        "price": result.price,
-                        "price_fmt": format_brl(result.price),
-                        "site": result.site,
-                        "notes": result.notes,
-                        "price_band": band,
-                        "best_vendor": getattr(result, "best_vendor", ""),
-                        "best_vendor_price": getattr(result, "best_vendor_price", None),
-                        "final_price_source": extract_final_price_source(result.notes),
-                    }
+                    result = _search_google_result(scraper, route)
+                    row = _store_result(db, route, result)
                     parsed.append(row)
-                    payload = {"type": "row", "index": idx, "total": total, "item": row}
+                    payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
                     yield f"data: {json.dumps(payload)}\n\n"
                     time.sleep(0.05)
+
+                    maxmilhas_result = _search_maxmilhas_result(p, route)
+                    if maxmilhas_result is not None:
+                        row = _store_result(db, route, maxmilhas_result)
+                        parsed.append(row)
+                        payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        time.sleep(0.05)
 
                 browser.close()
 

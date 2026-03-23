@@ -199,25 +199,31 @@
             body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">${data.error}</td></tr>`;
           } else {
             const rota = data.rota || {};
-            const r = data.resultado || {};
-            const preco = r.price_fmt || 'Sem preço';
             const dataVoo = safe(rota.inbound_date) ? `${safe(rota.outbound_date)} / ${safe(rota.inbound_date)}` : `${safe(rota.outbound_date)}`;
+            const resultados = Array.isArray(data.resultados) && data.resultados.length
+              ? [...data.resultados]
+              : [data.resultado || {}];
 
-            const melhorCompra = (r.best_vendor && String(r.best_vendor).trim())
-              ? `${safe(r.best_vendor)} (${safe(formatPrice(r.best_vendor_price), '-')})`
-              : '-';
+            resultados.sort((a, b) => sortByPriceAsc(a, b));
 
-            body.innerHTML = `
-              <tr>
-                <td>${safe(rota.origin)} → ${safe(rota.destination)}</td>
-                <td>${dataVoo}</td>
-                <td class="${priceTextClass(r.price)}">${preco}</td>
-                <td>${melhorCompra}</td>
-                <td>${safe(r.site)}</td>
-                <td>${safe(r.final_price_source)}</td>
-                <td>${formatDateTimePtBr(new Date().toISOString())}</td>
-              </tr>
-            `;
+            body.innerHTML = resultados.map((r) => {
+              const preco = r.price_fmt || 'Sem preço';
+              const melhorCompra = (r.best_vendor && String(r.best_vendor).trim())
+                ? `${safe(r.best_vendor)} (${safe(formatPrice(r.best_vendor_price), '-')})`
+                : '-';
+
+              return `
+                <tr>
+                  <td>${safe(rota.origin)} → ${safe(rota.destination)}</td>
+                  <td>${dataVoo}</td>
+                  <td class="${priceTextClass(r.price)}">${preco}</td>
+                  <td>${melhorCompra}</td>
+                  <td>${safe(r.site)}</td>
+                  <td>${safe(r.final_price_source)}</td>
+                  <td>${formatDateTimePtBr(new Date().toISOString())}</td>
+                </tr>
+              `;
+            }).join('');
             highlightBestRows('consulta-body', 2);
           }
 

@@ -1,49 +1,15 @@
 {
-  "ok": false,
-  "motivo": "Nao encontrou o botao de busca",
-  "inputs_visiveis": [
-    {
-      "indice": 0,
-      "placeholder": null,
-      "aria_label": null,
-      "type": "checkbox"
-    },
-    {
-      "indice": 1,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    },
-    {
-      "indice": 2,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    },
-    {
-      "indice": 3,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    },
-    {
-      "indice": 4,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    },
-    {
-      "indice": 5,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    },
-    {
-      "indice": 6,
-      "placeholder": " ",
-      "aria_label": null,
-      "type": null
-    }
+  "ok": true,
+  "motivo": null,
+  "origem": "PVH",
+  "destino": "FOR",
+  "data_ida": "2026-06-05",
+  "url_final": "https://www.maxmilhas.com.br/busca-passagens-aereas/OW/PVH/FOR/2026-06-05/1/0/0/EC",
+  "precos_encontrados": [
+    1226.07,
+    1290.6,
+    1411.91
   ],
-  "url_final": "https://www.maxmilhas.com.br/passagens-aereas"
+  "menor_preco": 1226.07,
+  "timestamp": "2026-03-23T01:04:05.557482"
 }

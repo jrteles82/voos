@@ -1,6 +1,7 @@
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from datetime import datetime
 import json
+import os
 import re
 import time
 import traceback
@@ -13,6 +14,8 @@ URL = "https://www.maxmilhas.com.br/passagens-aereas"
 HEADLESS = True
 MAX_TENTATIVAS = 3
 TIMEOUT_PADRAO = 30000
+SALVAR_DEBUG = False
+LIMPAR_DEBUGS_ANTIGOS = False
 
 
 def log(msg: str):
@@ -51,6 +54,30 @@ def salvar_html(page, nome="debug_pagina.html"):
         warn(f"Falha ao salvar HTML: {e}")
 
 
+def salvar_debug(page, nome_base: str, salvar_png=True, salvar_pagina_html=False):
+    if not SALVAR_DEBUG:
+        return
+
+    if salvar_png:
+        tirar_screenshot(page, f"{nome_base}.png")
+    if salvar_pagina_html:
+        salvar_html(page, f"{nome_base}.html")
+
+
+def limpar_arquivos_debug():
+    if not LIMPAR_DEBUGS_ANTIGOS:
+        return
+
+    for nome in os.listdir("."):
+        if not nome.startswith("debug_") or not os.path.isfile(nome):
+            continue
+        try:
+            os.remove(nome)
+            log(f"Arquivo de debug removido: {nome}")
+        except Exception as e:
+            warn(f"Falha removendo arquivo de debug {nome}: {e}")
+
+
 def normalizar_preco(texto: str):
     m = re.search(r"R\$\s*([\d\.\,]+)", texto)
     if not m:
@@ -63,6 +90,37 @@ def normalizar_preco(texto: str):
 
 
 def fechar_popups(page):
+    try:
+        page.evaluate("""
+        () => {
+          const ids = [
+            'dengage-blocked-push-info-container',
+            'dengage-push-perm-slideup',
+            'onesignal-slidedown-container'
+          ];
+          for (const id of ids) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+          }
+          const selectors = [
+            '._dn_blocked_info-container',
+            '._dn_blocked_info-background',
+            '#dengage-blocked-push-info-container',
+            '.modal-backdrop',
+            '[data-testid="modal-overlay"]'
+          ];
+          for (const sel of selectors) {
+            document.querySelectorAll(sel).forEach((el) => {
+              el.style.display = 'none';
+              el.style.pointerEvents = 'none';
+              el.remove?.();
+            });
+          }
+        }
+        """)
+    except Exception:
+        pass
+
     seletores = [
         "button:has-text('Aceitar')",
         "button:has-text('Entendi')",
@@ -97,6 +155,8 @@ def obter_inputs_texto_visiveis(page):
             editable = inp.is_editable()
             placeholder = inp.get_attribute("placeholder")
             aria = inp.get_attribute("aria-label")
+            nome = (inp.get_attribute("name") or "").lower()
+            elem_id = (inp.get_attribute("id") or "").lower()
 
             info = {
                 "indice_visivel": i,
@@ -104,10 +164,14 @@ def obter_inputs_texto_visiveis(page):
                 "editable": editable,
                 "placeholder": placeholder,
                 "aria_label": aria,
+                "name": nome,
+                "id": elem_id,
             }
             log(f"Input visível {i}: {info}")
 
-            if editable and tipo != "checkbox":
+            eh_newsletter = any(token in f"{nome} {elem_id}" for token in ["newsletter", "email"])
+            tipo_invalido = tipo in {"checkbox", "radio", "submit", "button", "hidden"}
+            if editable and not tipo_invalido and not eh_newsletter:
                 resultado.append((i, inp))
         except Exception as e:
             warn(f"Erro inspecionando input {i}: {e}")
@@ -140,35 +204,109 @@ def preencher_input(inp, valor: str, nome: str, page):
     log(f"{nome} preenchido com '{valor}'")
 
 
-def preencher_campos(page):
-    candidatos = obter_inputs_texto_visiveis(page)
+def preencher_origem_destino_por_id(page, seletor: str, valor: str, nome: str):
+    inp = page.locator(f"{seletor}:visible").first
+    inp.wait_for(state="visible", timeout=5000)
+    preencher_input(inp, valor, nome, page)
 
-    if len(candidatos) < 3:
-        return {
-            "ok": False,
-            "motivo": f"Poucos inputs úteis encontrados: {len(candidatos)}"
-        }
 
-    data_br = datetime.strptime(DATA_IDA_ISO, "%Y-%m-%d").strftime("%d/%m/%Y")
+def preencher_data_ida(page, data_iso: str):
+    data_br = datetime.strptime(data_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    target = datetime.strptime(data_iso, "%Y-%m-%d")
+    meses = {
+        1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril",
+        5: "maio", 6: "junho", 7: "julho", 8: "agosto",
+        9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro",
+    }
+    aria_data = f"{target.day} de {meses[target.month]} de {target.year}"
 
     try:
-        preencher_input(candidatos[0][1], ORIGEM, "origem", page)
-        page.wait_for_timeout(800)
+        gatilhos = [
+            "input#outboundDate:visible",
+            "input#outbounddate:visible",
+            "label:has-text('Ida')",
+            "label:has-text('Data da ida')",
+        ]
+        aberto = False
+        for sel in gatilhos:
+            try:
+                page.locator(sel).first.click(timeout=3000, force=True)
+                page.wait_for_timeout(600)
+                aberto = True
+                break
+            except Exception:
+                pass
+        if not aberto:
+            page.get_by_text("Ida", exact=False).first.click(timeout=3000)
+            page.wait_for_timeout(600)
 
-        preencher_input(candidatos[1][1], DESTINO, "destino", page)
-        page.wait_for_timeout(800)
-
-        data_ok = False
-        for pos in [2, 3]:
-            if pos < len(candidatos):
+        for _ in range(12):
+            dia = page.locator(f"abbr[aria-label='{aria_data}']").first
+            if dia.count() > 0:
+                dia.click(timeout=3000)
+                page.wait_for_timeout(500)
                 try:
-                    preencher_input(candidatos[pos][1], data_br, "data", page)
-                    data_ok = True
-                    break
-                except Exception as e:
-                    warn(f"Falha preenchendo data no candidato {pos}: {e}")
+                    page.get_by_role("button", name="Continuar").click(timeout=2000)
+                except Exception:
+                    pass
+                log(f"data preenchido com '{data_br}' via calendario")
+                return True
 
-        if not data_ok:
+            avancar = page.get_by_role("button", name=re.compile("Próximo mês", re.I))
+            if avancar.count() == 0:
+                break
+            avancar.first.click(timeout=3000)
+            page.wait_for_timeout(400)
+    except Exception as e:
+        warn(f"Falha preenchendo data via calendario: {e}")
+
+    try:
+        ok = page.evaluate(
+            """
+            ({ value }) => {
+              const selectors = ['input#outboundDate', 'input#outbounddate'];
+              for (const selector of selectors) {
+                const inputs = Array.from(document.querySelectorAll(selector));
+                const input = inputs[inputs.length - 1];
+                if (!input) continue;
+                input.removeAttribute('readonly');
+                input.removeAttribute('disabled');
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                  window.HTMLInputElement.prototype,
+                  'value'
+                )?.set;
+                nativeSetter ? nativeSetter.call(input, value) : input.value = value;
+                input.setAttribute('value', value);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new Event('blur', { bubbles: true }));
+                return true;
+              }
+              return false;
+            }
+            """,
+            {"value": data_br},
+        )
+        if ok:
+            log(f"data preenchido com '{data_br}' via JS fallback")
+            return True
+    except Exception as e:
+        warn(f"Falha preenchendo data via JS fallback: {e}")
+
+    return False
+
+
+def preencher_campos(page):
+    try:
+        obter_inputs_texto_visiveis(page)
+
+        preencher_origem_destino_por_id(page, "#from", ORIGEM, "origem")
+        page.wait_for_timeout(800)
+
+        preencher_origem_destino_por_id(page, "#to", DESTINO, "destino")
+        page.wait_for_timeout(800)
+
+        if not preencher_data_ida(page, DATA_IDA_ISO):
             return {
                 "ok": False,
                 "motivo": "Não conseguiu preencher a data"
@@ -211,8 +349,14 @@ def pagina_tem_resultado(page):
         return False
 
 
+def construir_url_busca():
+    return f"https://www.maxmilhas.com.br/busca-passagens-aereas/OW/{ORIGEM}/{DESTINO}/{DATA_IDA_ISO}/1/0/0/EC"
+
+
 def clicar_buscar(page):
     log("Tentando disparar busca...")
+    fechar_popups(page)
+    page.wait_for_timeout(500)
 
     try:
         candidatos = obter_inputs_texto_visiveis(page)
@@ -257,7 +401,11 @@ def clicar_buscar(page):
             loc = page.locator(seletor).first
             if loc.is_visible(timeout=1500):
                 log(f"Clicando botão/role: {seletor}")
-                loc.click(timeout=5000)
+                try:
+                    loc.click(timeout=5000)
+                except Exception:
+                    fechar_popups(page)
+                    loc.click(timeout=5000, force=True)
                 page.wait_for_timeout(5000)
 
                 if page.url != URL or pagina_tem_resultado(page):
@@ -271,7 +419,11 @@ def clicar_buscar(page):
             loc = page.get_by_text(txt, exact=False).first
             if loc.is_visible(timeout=1500):
                 log(f"Clicando texto visível: {txt}")
-                loc.click(timeout=5000)
+                try:
+                    loc.click(timeout=5000)
+                except Exception:
+                    fechar_popups(page)
+                    loc.click(timeout=5000, force=True)
                 page.wait_for_timeout(5000)
 
                 if page.url != URL or pagina_tem_resultado(page):
@@ -282,7 +434,11 @@ def clicar_buscar(page):
     try:
         houve_submit = page.evaluate("""
         () => {
-          const forms = Array.from(document.querySelectorAll('form'));
+          const forms = Array.from(document.querySelectorAll('form')).filter((form) => {
+            const text = (form.innerText || '').toLowerCase();
+            const html = (form.outerHTML || '').toLowerCase();
+            return text.includes('pesquisar') || text.includes('buscar') || html.includes('passagens');
+          });
           if (!forms.length) return false;
           forms[0].requestSubmit ? forms[0].requestSubmit() : forms[0].submit();
           return true;
@@ -296,6 +452,16 @@ def clicar_buscar(page):
                 return True
     except Exception as e:
         warn(f"Falha no submit JS: {e}")
+
+    try:
+        url_busca = construir_url_busca()
+        log(f"Navegando direto para URL de busca: {url_busca}")
+        page.goto(url_busca, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(8000)
+        if page.url != URL or pagina_tem_resultado(page):
+            return True
+    except Exception as e:
+        warn(f"Falha navegando direto para a URL de busca: {e}")
 
     return False
 
@@ -358,12 +524,11 @@ def executar_uma_tentativa(tentativa: int):
             fechar_popups(page)
             page.wait_for_timeout(1000)
 
-            tirar_screenshot(page, f"debug_inicio_t{tentativa}.png")
+            salvar_debug(page, f"debug_inicio_t{tentativa}")
 
             preenchimento = preencher_campos(page)
             if not preenchimento["ok"]:
-                tirar_screenshot(page, f"debug_campos_falha_t{tentativa}.png")
-                salvar_html(page, f"debug_campos_falha_t{tentativa}.html")
+                salvar_debug(page, f"debug_campos_falha_t{tentativa}", salvar_pagina_html=True)
                 return {
                     "ok": False,
                     "motivo": preenchimento["motivo"],
@@ -371,12 +536,11 @@ def executar_uma_tentativa(tentativa: int):
                     "timestamp": datetime.now().isoformat(),
                 }
 
-            tirar_screenshot(page, f"debug_campos_t{tentativa}.png")
+            salvar_debug(page, f"debug_campos_t{tentativa}")
 
             buscou = clicar_buscar(page)
             if not buscou:
-                tirar_screenshot(page, f"debug_sem_busca_t{tentativa}.png")
-                salvar_html(page, f"debug_sem_busca_t{tentativa}.html")
+                salvar_debug(page, f"debug_sem_busca_t{tentativa}", salvar_pagina_html=True)
                 return {
                     "ok": False,
                     "motivo": "Não encontrou botão de busca",
@@ -385,8 +549,7 @@ def executar_uma_tentativa(tentativa: int):
                 }
 
             page.wait_for_timeout(10000)
-            tirar_screenshot(page, f"debug_resultados_t{tentativa}.png")
-            salvar_html(page, f"debug_resultados_t{tentativa}.html")
+            salvar_debug(page, f"debug_resultados_t{tentativa}", salvar_pagina_html=True)
 
             if not pagina_tem_resultado(page):
                 return {
@@ -438,6 +601,8 @@ def executar_uma_tentativa(tentativa: int):
 
 def buscar_menor_preco():
     ultimo_resultado = None
+
+    limpar_arquivos_debug()
 
     for tentativa in range(1, MAX_TENTATIVAS + 1):
         resultado = executar_uma_tentativa(tentativa)

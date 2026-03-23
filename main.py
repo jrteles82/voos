@@ -27,7 +27,10 @@ from skyscanner import (
     parse_price_brl,
     sync_playwright,
 )
-from maxmilhas import buscar_menor_preco as buscar_menor_preco_maxmilhas
+from maxmilhas import (
+    buscar_menor_preco as buscar_menor_preco_maxmilhas,
+    filtrar_precos_parcelados,
+)
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SKYSCANNER_SECRET_KEY", "dev-change-this-secret")
@@ -505,6 +508,57 @@ def extract_final_price_source(notes: str | None) -> str:
     return (m.group(1) or "").strip()
 
 
+def _extract_maxmilhas_prices_from_notes(notes: str | None) -> list[float]:
+    txt = notes or ""
+    match = re.search(r"precos=\[([^\]]+)\]", txt)
+    if not match:
+        return []
+
+    prices = []
+    for raw in match.group(1).split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            prices.append(float(raw))
+        except ValueError:
+            continue
+    return prices
+
+
+def normalize_maxmilhas_history() -> int:
+    db = Database(get_db_path())
+    rows = db.conn.execute(
+        """
+        SELECT id, price, best_vendor_price, notes
+        FROM results
+        WHERE site = 'maxmilhas' AND notes LIKE '%precos=[%'
+        """
+    ).fetchall()
+
+    updated = 0
+    for row in rows:
+        prices = _extract_maxmilhas_prices_from_notes(row["notes"])
+        if not prices:
+            continue
+        filtered = filtrar_precos_parcelados(prices)
+        if not filtered:
+            continue
+        expected = min(filtered)
+        current = row["price"]
+        if current is None or abs(float(current) - float(expected)) < 0.01:
+            continue
+        db.conn.execute(
+            "UPDATE results SET price = ?, best_vendor_price = ? WHERE id = ?",
+            (expected, expected, row["id"]),
+        )
+        updated += 1
+
+    if updated:
+        db.conn.commit()
+    return updated
+
+
 
 def _to_route(query_args) -> RouteQuery:
     origin = query_args.get("origin", CONFIG.get("origin", "PVH")).upper()
@@ -706,6 +760,14 @@ def historico():
     for item in items:
         item["final_price_source"] = extract_final_price_source(item.get("notes"))
     return jsonify({"total": len(items), "items": items})
+
+
+@app.route("/historico/limpar", methods=["POST"])
+def limpar_historico():
+    db = Database(get_db_path())
+    deleted = db.conn.execute("DELETE FROM results").rowcount
+    db.conn.commit()
+    return jsonify({"status": "ok", "deleted": deleted})
 
 
 @app.route("/cron", methods=["GET"])
@@ -1382,6 +1444,7 @@ def painel():
                         <div class='d-flex gap-2'>
                           <input id='historico-limit' type='number' class='form-control form-control-sm' value='20' min='1' max='200' style='width: 90px;' />
                           <button class='btn btn-outline-success btn-sm' type='button' onclick='historico()'>Atualizar</button>
+                          <button class='btn btn-outline-danger btn-sm' type='button' onclick='limparHistorico()'>Limpar</button>
                         </div>
                       </div>
                       <div id='historico-loading' class='text-muted mb-2' style='display:none;'>Carregando histórico...</div>
@@ -1641,6 +1704,7 @@ def save_cron():
 
 if __name__ == "__main__":
     init_auth_tables()
+    normalize_maxmilhas_history()
     start_auto_scan_if_needed()
     debug_mode = os.getenv("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes")
     app.run(debug=debug_mode)

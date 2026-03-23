@@ -98,6 +98,27 @@ def normalizar_preco(texto: str):
         return None
 
 
+def filtrar_precos_parcelados(precos: list[float]) -> list[float]:
+    if not precos:
+        return []
+
+    arredondados = sorted(set(round(preco, 2) for preco in precos if preco is not None))
+    totais = set(arredondados)
+    filtrados = []
+
+    for preco in arredondados:
+        eh_parcela = False
+        for parcelas in range(2, 13):
+            total_estimado = round(preco * parcelas, 2)
+            if total_estimado in totais:
+                eh_parcela = True
+                break
+        if not eh_parcela:
+            filtrados.append(preco)
+
+    return filtrados or arredondados
+
+
 def fechar_popups(page):
     try:
         page.evaluate("""
@@ -481,6 +502,7 @@ def extrair_precos(page):
         encontrados = re.findall(r"R\$\s*[\d\.\,]+", texto)
         precos = [normalizar_preco(x) for x in encontrados]
         precos = [p for p in precos if p is not None and p > 200]
+        precos = filtrar_precos_parcelados(precos)
         return sorted(set(precos))
     except Exception as e:
         warn(f"Falha ao extrair preços: {e}")

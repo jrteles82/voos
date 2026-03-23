@@ -455,6 +455,25 @@
         }
       }
 
+      async function limparHistorico() {
+        const ok = window.confirm('Limpar todo o histórico de consultas?');
+        if (!ok) return;
+
+        const body = document.getElementById('historico-body');
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Limpando histórico...</td></tr>';
+
+        try {
+          const res = await fetch('/historico/limpar', { method: 'POST' });
+          const data = await res.json();
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'Falha ao limpar histórico.');
+          }
+          await historico();
+        } catch (e) {
+          body.innerHTML = '<tr><td colspan="7" class="text-center text-danger">Erro ao limpar histórico.</td></tr>';
+        }
+      }
+
       // carrega automático ao abrir
       enableColumnSorting('consulta-table');
       enableColumnSorting('cron-table');

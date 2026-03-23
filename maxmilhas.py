@@ -102,11 +102,11 @@ def filtrar_precos_parcelados(precos: list[float]) -> list[float]:
     if not precos:
         return []
 
-    arredondados = sorted(set(round(preco, 2) for preco in precos if preco is not None))
-    totais = set(arredondados)
+    candidatos = sorted(set(round(preco, 2) for preco in precos if preco is not None))
+    totais = set(candidatos)
     filtrados = []
 
-    for preco in arredondados:
+    for preco in candidatos:
         eh_parcela = False
         for parcelas in range(2, 13):
             total_estimado = round(preco * parcelas, 2)
@@ -116,7 +116,19 @@ def filtrar_precos_parcelados(precos: list[float]) -> list[float]:
         if not eh_parcela:
             filtrados.append(preco)
 
-    return filtrados or arredondados
+    filtrados = filtrados or candidatos
+
+    # Fallback para parcelas arredondadas: remove o menor valor quando ele é um
+    # outlier muito abaixo do próximo preço disponível.
+    while len(filtrados) >= 2:
+        menor = filtrados[0]
+        proximo = filtrados[1]
+        if menor < (proximo * 0.45):
+            filtrados.pop(0)
+            continue
+        break
+
+    return filtrados or candidatos
 
 
 def fechar_popups(page):

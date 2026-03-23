@@ -76,27 +76,27 @@ AIRPORT_OPTIONS = [
 ]
 
 
+def date_color_token(date_iso: str | None) -> tuple[str, str]:
+    txt = (date_iso or "").strip()
+    palette = [
+        ("🔵", "azul"),
+        ("🟢", "verde"),
+        ("🟠", "laranja"),
+        ("🟣", "roxo"),
+        ("🟡", "amarelo"),
+        ("🔴", "vermelho"),
+        ("🟤", "marrom"),
+    ]
+    digits = [int(ch) for ch in txt if ch.isdigit()]
+    if not digits:
+        return "⚪", "cinza"
+    return palette[sum(digits) % len(palette)]
+
+
 def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     def _price_num(row):
         v = row.get("price")
         return v if isinstance(v, (int, float)) and v is not None else 10**12
-
-    def _route_line(row, medal=""):
-        data_txt = f"{row.get('outbound_date')}" + (f" / {row.get('inbound_date')}" if row.get('inbound_date') else "")
-        vendor = (row.get("best_vendor") or "").strip()
-        line = f"{medal}{row.get('origin')}→{row.get('destination')} | {data_txt} | {row.get('price_fmt')}"
-        if vendor:
-            line += f" | vendedor: {vendor}"
-        return line
-
-    if not parsed:
-        return (
-            "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -\n"
-            "Sem dados nesta execução."
-        )
-
-    idas = [r for r in parsed if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"]
-    voltas = [r for r in parsed if str(r.get("destination", "")).upper() == "PVH"]
 
     def _dedupe_sorted_rows(rows: list[dict]) -> list[dict]:
         seen = set()
@@ -107,13 +107,57 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
                 str(row.get("destination", "")).upper(),
                 row.get("outbound_date", ""),
                 row.get("inbound_date", "") or "",
-                str(row.get("site", "")).lower(),
             )
             if key in seen:
                 continue
             seen.add(key)
             result.append(row)
         return result
+
+    PRICE_BAND_COLORS = {
+        "excelente": "🟢",
+        "bom": "🟡",
+        "normal": "🔵",
+        "caro": "🟤",
+        "sem_preco": "⚪️",
+        "novo": "🔵",
+    }
+
+    def _format_direction(rows: list[dict], best_row: dict | None, section_title: str) -> list[str]:
+        if not rows:
+            return [section_title, "N/D"]
+
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            date = row.get("outbound_date", "") or ""
+            grouped.setdefault(date, []).append(row)
+
+        ordered_dates = sorted(grouped.keys())
+        section_lines = [section_title]
+        for date_idx, date in enumerate(ordered_dates):
+            group = grouped[date]
+            header = f"📅 {date}" if date else "📅 data pendente"
+            section_lines.append(header)
+            for row in group:
+                medal = "🥇 " if best_row is row else ""
+                color = PRICE_BAND_COLORS.get((row.get("price_band") or "").lower(), "🔵")
+                vendor = (row.get("best_vendor") or "").strip()
+                vendor_txt = f" | vendedor: {vendor}" if vendor else ""
+                section_lines.append(
+                    f"{medal}{row.get('origin')}→{row.get('destination')} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}"
+                )
+            if date_idx != len(ordered_dates) - 1:
+                section_lines.append("")
+        return section_lines
+
+    if not parsed:
+        return (
+            "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -\n"
+            "Sem dados nesta execução."
+        )
+
+    idas = [r for r in parsed if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"]
+    voltas = [r for r in parsed if str(r.get("destination", "")).upper() == "PVH"]
 
     idas_ok = _dedupe_sorted_rows(sorted([r for r in idas if r.get("price") is not None], key=_price_num))
     voltas_ok = _dedupe_sorted_rows(sorted([r for r in voltas if r.get("price") is not None], key=_price_num))
@@ -122,23 +166,10 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",
         f"Execução: {trigger}",
         "",
-        "IDAS (PVH -> destino):",
+        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, "IDAS (PVH -> destino):")),
+        "",
+        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, "VOLTAS (destino -> PVH):")),
     ]
-
-    if idas_ok:
-        for i, r in enumerate(idas_ok, start=1):
-            medal = "🥇 " if i == 1 else ""
-            lines.append(_route_line(r, medal))
-    else:
-        lines.append("N/D")
-
-    lines += ["", "VOLTAS (destino -> PVH):"]
-    if voltas_ok:
-        for i, r in enumerate(voltas_ok, start=1):
-            medal = "🥇 " if i == 1 else ""
-            lines.append(_route_line(r, medal))
-    else:
-        lines.append("N/D")
 
     total_ok = len([r for r in parsed if r.get("price") is not None])
     lines += ["", f"Resumo: {total_ok}/{len(parsed)} rotas com preço válido."]
@@ -685,7 +716,7 @@ def consulta():
         resumo = (
             "────────── ✈️ CONSULTA RÁPIDA ✈️ ──────────\n"
             f"Rota: {route.origin} → {route.destination}\n"
-            f"Data: {route.outbound_date}\n"
+            f"Data: {date_color_token(route.outbound_date)[0]} {route.outbound_date}\n"
             + (f" / {route.inbound_date}" if route.inbound_date else "")
             + "\n"
             + "Resultados:\n"

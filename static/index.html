@@ -249,6 +249,31 @@
         return Number.isFinite(n) && n <= 1000 ? 'text-success fw-bold' : '';
       }
 
+      function dateBadgeClass(dateIso) {
+        const txt = String(dateIso || '').trim();
+        const palette = [
+          'bg-primary-subtle text-primary-emphasis',
+          'bg-success-subtle text-success-emphasis',
+          'bg-warning-subtle text-warning-emphasis',
+          'bg-info-subtle text-info-emphasis',
+          'bg-danger-subtle text-danger-emphasis',
+          'bg-secondary-subtle text-secondary-emphasis',
+          'bg-dark-subtle text-dark-emphasis',
+        ];
+        const digits = Array.from(txt).filter((ch) => /\d/.test(ch)).map((ch) => Number(ch));
+        if (!digits.length) return 'bg-secondary-subtle text-secondary-emphasis';
+        const idx = digits.reduce((sum, n) => sum + n, 0) % palette.length;
+        return palette[idx];
+      }
+
+      function renderFlightDateHtml(outboundDate, inboundDate) {
+        const outbound = safe(outboundDate, '');
+        const inbound = safe(inboundDate, '');
+        const outboundHtml = outbound ? `<span class="badge ${dateBadgeClass(outbound)}">${outbound}</span>` : '-';
+        if (!inbound || inbound === '-') return outboundHtml;
+        return `${outboundHtml} <span class="text-muted">/</span> <span class="badge ${dateBadgeClass(inbound)}">${inbound}</span>`;
+      }
+
       function trajetoFromDestination(destination) {
         return String(destination || '').trim().toUpperCase() === 'PVH'
           ? 'Volta → PVH'
@@ -396,7 +421,7 @@
             body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">${data.error}</td></tr>`;
           } else {
             const rota = data.rota || {};
-            const dataVoo = safe(rota.inbound_date) ? `${safe(rota.outbound_date)} / ${safe(rota.inbound_date)}` : `${safe(rota.outbound_date)}`;
+            const dataVoo = renderFlightDateHtml(rota.outbound_date, rota.inbound_date);
             const resultados = Array.isArray(data.resultados) && data.resultados.length
               ? [...data.resultados]
               : [data.resultado || {}];
@@ -493,7 +518,7 @@
             rows.push(`
 <tr>
 <td>${safe(item.origin)} → ${safe(item.destination)}</td>
-<td>${safe(item.inbound_date) ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : `${safe(item.outbound_date)}`}</td>
+<td>${renderFlightDateHtml(item.outbound_date, item.inbound_date)}</td>
 <td class="${priceTextClass(item.price)}">${safe(item.price_fmt, 'Sem preço')}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
@@ -510,7 +535,7 @@
             rows.push(`
 <tr>
 <td>${safe(item.origin)} → ${safe(item.destination)}</td>
-<td>${safe(item.inbound_date) ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : `${safe(item.outbound_date)}`}</td>
+<td>${renderFlightDateHtml(item.outbound_date, item.inbound_date)}</td>
 <td class="${priceTextClass(item.price)}">${safe(item.price_fmt, 'Sem preço')}</td>
 <td>${melhorCompra}</td>
 <td>${safe(item.site)}</td>
@@ -606,7 +631,7 @@
           if (idas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>IDAS</strong> (menor → maior preço)</td></tr>');
           for (const item of idas) {
             const rota = `${safe(item.origin)} → ${safe(item.destination)}`;
-            const dataVoo = item.inbound_date ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : safe(item.outbound_date);
+            const dataVoo = renderFlightDateHtml(item.outbound_date, item.inbound_date);
             const preco = item.price !== null && item.price !== undefined ? `R$ ${Number(item.price).toFixed(2).replace('.', ',')}` : 'Sem preço';
             const melhorCompra = (item.best_vendor && String(item.best_vendor).trim())
               ? `${safe(item.best_vendor)} (${safe(formatPrice(item.best_vendor_price), '-')})`
@@ -626,7 +651,7 @@
           if (voltas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>VOLTAS PARA PVH</strong> (menor → maior preço)</td></tr>');
           for (const item of voltas) {
             const rota = `${safe(item.origin)} → ${safe(item.destination)}`;
-            const dataVoo = item.inbound_date ? `${safe(item.outbound_date)} / ${safe(item.inbound_date)}` : safe(item.outbound_date);
+            const dataVoo = renderFlightDateHtml(item.outbound_date, item.inbound_date);
             const preco = item.price !== null && item.price !== undefined ? `R$ ${Number(item.price).toFixed(2).replace('.', ',')}` : 'Sem preço';
             const melhorCompra = (item.best_vendor && String(item.best_vendor).trim())
               ? `${safe(item.best_vendor)} (${safe(formatPrice(item.best_vendor_price), '-')})`

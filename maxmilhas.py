@@ -12,10 +12,18 @@ DATA_IDA_ISO = "2026-06-05"
 URL = "https://www.maxmilhas.com.br/passagens-aereas"
 
 HEADLESS = True
-MAX_TENTATIVAS = 3
+MAX_TENTATIVAS = 1
 TIMEOUT_PADRAO = 30000
 SALVAR_DEBUG = False
 LIMPAR_DEBUGS_ANTIGOS = False
+BUSCA_RESULT_TIMEOUT = 20000  # espera por resultados reais (ms)
+MAX_ROUTAS_SEGUNDOS = 45  # tempo máximo permitido por rota
+RESULT_SELECTORS = [
+    "div[data-testid='flight-card']",
+    "div[data-testid='flight-list-item']",
+    "div[class*='flight-card']",
+    "div[class*='resultado-voo']",
+]
 
 
 def log(msg: str):
@@ -182,6 +190,45 @@ def fechar_popups(page):
         except Exception:
             pass
     return False
+
+
+def log_duration(label: str, start: float):
+    elapsed = time.perf_counter() - start
+    log(f"{label}: {elapsed:.1f}s")
+
+
+def aguardar_resultados(page, timeout: int = BUSCA_RESULT_TIMEOUT) -> bool:
+    for seletor in RESULT_SELECTORS:
+        try:
+            page.wait_for_selector(seletor, timeout=timeout)
+            log(f"Resultado detectado via seletor {seletor}")
+            return True
+        except Exception:
+            continue
+
+    try:
+        page.wait_for_function(
+            "() => /voos encontrados|resultados|ordenar|filtrar/i.test(document.body.innerText)",
+            timeout=timeout,
+        )
+        log("Resultado detectado pelo texto da página")
+        return True
+    except Exception:
+        log("Não encontrou resultados por texto")
+        return False
+
+
+def navegar_para_busca(page, origem: str, destino: str, data_ida_iso: str) -> bool:
+    url_busca = construir_url_busca(origem, destino, data_ida_iso)
+    log(f"Navegando direto para URL de busca: {url_busca}")
+    inicio = time.perf_counter()
+    page.goto(url_busca, wait_until="domcontentloaded", timeout=60000)
+    log_duration("Carregamento da busca", inicio)
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+    return aguardar_resultados(page)
 
 
 def obter_inputs_texto_visiveis(page):
@@ -566,44 +613,55 @@ def _executar_uma_tentativa_com_playwright(
         context = criar_context(browser)
         page = context.new_page()
 
-        page.goto(params["url_base"], wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(5000)
-
-        log(f"Título: {page.title()}")
-        log(f"URL atual: {page.url}")
-
-        fechar_popups(page)
-        page.wait_for_timeout(1000)
-
-        salvar_debug(page, f"debug_inicio_t{tentativa}")
-
-        preenchimento = preencher_campos(page, params["origem"], params["destino"], params["data_ida"])
-        if not preenchimento["ok"]:
-            salvar_debug(page, f"debug_campos_falha_t{tentativa}", salvar_pagina_html=True)
-            return {
-                "ok": False,
-                "motivo": preenchimento["motivo"],
-                "origem": params["origem"],
-                "destino": params["destino"],
-                "data_ida": params["data_ida"],
-                "url_final": page.url,
-                "timestamp": datetime.now().isoformat(),
-            }
-
-        salvar_debug(page, f"debug_campos_t{tentativa}")
-
-        buscou = clicar_buscar(
+        # Caminho rápido: a URL de busca já contém todos os parâmetros necessários.
+        # Isso evita abrir a home, preencher formulário e submeter a busca em toda rota.
+        buscou = navegar_para_busca(
             page,
             params["origem"],
             params["destino"],
             params["data_ida"],
-            url_base=params["url_base"],
         )
+        if not buscou:
+            page.goto(params["url_base"], wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(1500)
+
+            log(f"Título: {page.title()}")
+            log(f"URL atual: {page.url}")
+
+            fechar_popups(page)
+            page.wait_for_timeout(600)
+
+            salvar_debug(page, f"debug_inicio_t{tentativa}")
+
+            preenchimento = preencher_campos(page, params["origem"], params["destino"], params["data_ida"])
+            if not preenchimento["ok"]:
+                salvar_debug(page, f"debug_campos_falha_t{tentativa}", salvar_pagina_html=True)
+                return {
+                    "ok": False,
+                    "motivo": preenchimento["motivo"],
+                    "origem": params["origem"],
+                    "destino": params["destino"],
+                    "data_ida": params["data_ida"],
+                    "url_final": page.url,
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+            salvar_debug(page, f"debug_campos_t{tentativa}")
+
+            buscou = clicar_buscar(
+                page,
+                params["origem"],
+                params["destino"],
+                params["data_ida"],
+            )
+            if buscou:
+                buscou = aguardar_resultados(page)
+
         if not buscou:
             salvar_debug(page, f"debug_sem_busca_t{tentativa}", salvar_pagina_html=True)
             return {
                 "ok": False,
-                "motivo": "Não encontrou botão de busca",
+                "motivo": "Não encontrou resultados válidos",
                 "origem": params["origem"],
                 "destino": params["destino"],
                 "data_ida": params["data_ida"],
@@ -611,19 +669,7 @@ def _executar_uma_tentativa_com_playwright(
                 "timestamp": datetime.now().isoformat(),
             }
 
-        page.wait_for_timeout(10000)
         salvar_debug(page, f"debug_resultados_t{tentativa}", salvar_pagina_html=True)
-
-        if not pagina_tem_resultado(page, url_base=params["url_base"]):
-            return {
-                "ok": False,
-                "motivo": "Página não aparenta ser de resultados",
-                "origem": params["origem"],
-                "destino": params["destino"],
-                "data_ida": params["data_ida"],
-                "url_final": page.url,
-                "timestamp": datetime.now().isoformat(),
-            }
 
         precos = extrair_precos(page)
 
@@ -705,12 +751,16 @@ def buscar_menor_preco(
     *,
     playwright=None,
     salvar_arquivo_json: bool = True,
+    max_tentativas: int = MAX_TENTATIVAS,
 ):
     ultimo_resultado = None
 
     limpar_arquivos_debug()
 
-    for tentativa in range(1, MAX_TENTATIVAS + 1):
+    total_tentativas = max(1, int(max_tentativas))
+    inicio_rota = time.perf_counter()
+
+    for tentativa in range(1, total_tentativas + 1):
         resultado = executar_uma_tentativa(
             tentativa,
             origem=origem,
@@ -734,8 +784,11 @@ def buscar_menor_preco(
             return resultado
 
         warn(f"Tentativa {tentativa} falhou: {resultado.get('motivo', 'Sem detalhe')}")
-        if tentativa < MAX_TENTATIVAS:
+        if tentativa < total_tentativas:
             time.sleep(3)
+        if time.perf_counter() - inicio_rota > MAX_ROUTAS_SEGUNDOS:
+            warn("Tempo máximo por rota excedido, abortando tentativas adicionais.")
+            break
 
     if salvar_arquivo_json:
         salvar_json(ultimo_resultado or {"ok": False, "motivo": "Sem resultado"})

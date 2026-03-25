@@ -77,8 +77,8 @@ DEFAULT_CONFIG = {
     "schedule_minutes": 180,
     "headless": True,
     "timeout_ms": 45000,
-    "settle_seconds": 10,
-    "request_pause_seconds": 4,
+    "settle_seconds": 2,
+    "request_pause_seconds": 0.2,
     "db_path": str(Path(__file__).with_name("flight_tracker_browser.db")),
     "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "8651349481:AAHRdUKl7Dx-GJ76Yy_kQiJ4jA6TCaQ8r4g"),
     "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "1748352987"),
@@ -413,15 +413,35 @@ class GoogleFlightsScraper:
                 pass
 
     def _wait_briefly_for_results(self, page) -> None:
+        ready = False
         try:
-            page.wait_for_load_state("networkidle", timeout=12000)
+            page.wait_for_load_state("networkidle", timeout=6000)
+            ready = True
         except Exception:
             pass
         try:
             page.locator("text=Menores preços").first.wait_for(timeout=5000)
+            ready = True
         except Exception:
             pass
-        time.sleep(CONFIG["settle_seconds"])
+        if not ready:
+            for selector in [
+                "[role='main'] [role='listitem']",
+                "[role='main'] li",
+                "[role='main'] div[role='button']",
+            ]:
+                try:
+                    page.locator(selector).first.wait_for(timeout=2500)
+                    ready = True
+                    break
+                except Exception:
+                    pass
+
+        settle_seconds = float(CONFIG.get("settle_seconds", 2))
+        # Se a página já mostrou sinais de resultado, evita a espera cheia.
+        extra_wait = min(1.0, settle_seconds) if ready else settle_seconds
+        if extra_wait > 0:
+            time.sleep(extra_wait)
 
     def _extract_summary_price(self, page) -> float | None:
         patterns = [

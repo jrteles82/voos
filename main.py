@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from flask import Flask, Response, jsonify, request, stream_with_context, session, redirect, url_for, render_template_string, g
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 import json
 import os
 import re
@@ -10,9 +11,12 @@ import random
 import requests
 import threading
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from datetime import datetime
+from math import ceil
 from werkzeug.security import generate_password_hash, check_password_hash
+from PIL import Image, ImageDraw, ImageFont
 
 from skyscanner import (
     CONFIG,
@@ -47,6 +51,7 @@ _user_scheduler_started = False
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
+    ("BPS", "BPS — Porto Seguro (BA)"),
     ("RIO", "RIO — Rio de Janeiro (RJ)"),
     ("SAO", "SAO — São Paulo (SP)"),
     ("BSB", "BSB — Brasília (DF)"),
@@ -139,12 +144,13 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
             header = f"📅 {date}" if date else "📅 data pendente"
             section_lines.append(header)
             for row in group:
-                medal = "🥇 " if best_row is row else ""
+                is_best = best_row is row
                 color = PRICE_BAND_COLORS.get((row.get("price_band") or "").lower(), "🔵")
                 vendor = (row.get("best_vendor") or "").strip()
                 vendor_txt = f" | vendedor: {vendor}" if vendor else ""
+                best_note = " | melhor preço" if is_best else ""
                 section_lines.append(
-                    f"{medal}{row.get('origin')}→{row.get('destination')} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}"
+                    f"{row.get('origin')}→{row.get('destination')} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}{best_note}"
                 )
             if date_idx != len(ordered_dates) - 1:
                 section_lines.append("")
@@ -176,11 +182,17 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     return "\n".join(lines)
 
 
-def notify_full_scan(parsed: list[dict], trigger: str = "manual", send_fn=None) -> None:
-    msg = build_full_scan_message(parsed, trigger=trigger)
+def notify_full_scan(parsed: list[dict], trigger: str = "manual", send_fn=None, max_price: float | None = None) -> None:
+    filtered = filter_rows_by_max_price(parsed, max_price)
+    msg = build_full_scan_message(filtered, trigger=trigger)
     sender = send_fn or send_telegram_message
     try:
-        sender(msg)
+        sender(msg, image_rows=filtered)
+    except TypeError:
+        try:
+            sender(msg)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -244,6 +256,7 @@ def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | No
         data_ida_iso=route.outbound_date,
         playwright=playwright,
         salvar_arquivo_json=False,
+        max_tentativas=1,
     )
 
     ok = bool(resultado and resultado.get("ok"))
@@ -286,41 +299,82 @@ def _store_result(db: Database, route: RouteQuery, result: FlightResult) -> dict
     return _result_to_row(result, band)
 
 
-def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
-    db = Database(get_db_path())
-    parsed = []
+def _split_routes(routes: list[RouteQuery], chunks: int) -> list[list[RouteQuery]]:
+    if not routes or chunks <= 0:
+        return []
+    chunk_size = ceil(len(routes) / chunks)
+    return [routes[i * chunk_size:(i + 1) * chunk_size] for i in range(chunks)]
 
-    with _scan_lock:
+
+def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
+    if not routes:
+        return []
+
+    total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
+    requested_workers = CONFIG.get("scan_workers", 2)
+    try:
+        requested_workers = int(requested_workers)
+    except (TypeError, ValueError):
+        requested_workers = 2
+    try:
+        override_workers = int(os.getenv("SKYSCANNER_SCAN_WORKERS", requested_workers))
+    except ValueError:
+        override_workers = requested_workers
+    worker_count = max(1, min(len(routes), override_workers))
+    route_chunks = _split_routes(routes, worker_count)
+    chunk_results: list[list[tuple[RouteQuery, FlightResult]] | None] = [None] * len(route_chunks)
+
+    def _scan_chunk(chunk_idx: int, chunk_routes: list[RouteQuery]) -> list[tuple[RouteQuery, FlightResult]]:
+        if not chunk_routes:
+            return []
+        worker_results: list[tuple[RouteQuery, FlightResult]] = []
+        user_data_dir = os.getenv("SKYSCANNER_USER_DATA_DIR", "/tmp/skyscanner-profile")
+        chunk_user_dir = f"{user_data_dir}-worker-{chunk_idx}"
         with sync_playwright() as p:
-            user_data_dir = os.getenv("SKYSCANNER_USER_DATA_DIR", "/tmp/skyscanner-profile")
             browser = p.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
+                user_data_dir=chunk_user_dir,
                 headless=bool(CONFIG.get("headless", True)),
                 locale="pt-BR",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             )
             scraper = GoogleFlightsScraper(browser)
+            try:
+                for route in chunk_routes:
+                    google_result = _search_google_result(scraper, route)
+                    worker_results.append((route, google_result))
+                    maxmilhas_result = _search_maxmilhas_result(p, route)
+                    if maxmilhas_result is not None:
+                        worker_results.append((route, maxmilhas_result))
+            finally:
+                browser.close()
+        return worker_results
 
-            idx = 0
-            total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
-            for route in routes:
-                google_result = _search_google_result(scraper, route)
-                google_row = _store_result(db, route, google_result)
-                parsed.append(google_row)
+    with _scan_lock:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(_scan_chunk, idx, chunk): idx
+                for idx, chunk in enumerate(route_chunks)
+            }
+            for future in as_completed(futures):
+                chunk_idx = futures[future]
+                chunk_results[chunk_idx] = future.result()
+
+    db = Database(get_db_path())
+    parsed: list[dict] = []
+    idx = 0
+    try:
+        for chunk in chunk_results:
+            if not chunk:
+                continue
+            for route, result in chunk:
+                row = _store_result(db, route, result)
+                parsed.append(row)
                 idx += 1
                 if on_row:
-                    on_row(idx, total, google_row)
-
-                maxmilhas_result = _search_maxmilhas_result(p, route)
-                if maxmilhas_result is not None:
-                    maxmilhas_row = _store_result(db, route, maxmilhas_result)
-                    parsed.append(maxmilhas_row)
-                    idx += 1
-                    if on_row:
-                        on_row(idx, total, maxmilhas_row)
-            browser.close()
-
-    return parsed
+                    on_row(idx, total, row)
+        return parsed
+    finally:
+        db.conn.close()
 
 
 def run_full_scan(on_row=None):
@@ -355,24 +409,40 @@ def _touch_user_cron_run(conn, user_id: int) -> None:
     conn.commit()
 
 
+def _user_has_running_scan(conn, user_id: int) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM user_runs
+        WHERE user_id = ? AND status = 'running'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    return bool(row)
+
+
 def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True):
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     run_id = _create_user_run(conn, user_id, trigger=trigger)
     try:
+        if trigger.startswith("agendada"):
+            _touch_user_cron_run(conn, user_id)
         routes = _build_user_routes(conn, user_id)
         if not routes:
             routes = build_db_queries(get_db_path())
         parsed = run_scan_for_routes(routes)
-        msg = build_full_scan_message(parsed, trigger=trigger)
+        max_price = get_user_max_display_price(user_id)
+        parsed_for_display = filter_rows_by_max_price(parsed, max_price)
+        msg = build_full_scan_message(parsed_for_display, trigger=trigger)
         if notify:
-            send_user_telegram_message(user_id, msg)
-        total_ok = len([r for r in parsed if r.get("price") is not None])
-        summary = f"ok: {total_ok}/{len(parsed)} com preço"
+            send_user_telegram_message(user_id, msg, image_rows=parsed_for_display)
+        total_ok = len([r for r in parsed_for_display if r.get("price") is not None])
+        summary = f"ok: {total_ok}/{len(parsed_for_display)} exibidos"
         _finish_user_run(conn, run_id, "ok", summary)
-        if trigger.startswith("agendada"):
-            _touch_user_cron_run(conn, user_id)
-        return {"status": "ok", "summary": summary, "parsed": parsed}
+        return {"status": "ok", "summary": summary, "parsed": parsed_for_display}
     except Exception as e:
         _finish_user_run(conn, run_id, "error", str(e)[:500])
         raise
@@ -386,7 +456,8 @@ def _auto_scan_loop():
     while True:
         try:
             parsed = run_full_scan()
-            notify_full_scan(parsed, trigger="agendada")
+            max_price = get_global_max_price_limit()
+            notify_full_scan(parsed, trigger="agendada", max_price=max_price)
             print(f"[auto-scan] consulta completa executada em {_scan_last_run_at}")
         except Exception as e:
             print(f"[auto-scan] erro: {e}")
@@ -394,6 +465,8 @@ def _auto_scan_loop():
 
 
 def start_auto_scan_if_needed():
+    start_user_scan_scheduler_if_needed()
+
     if not AUTO_SCAN_ENABLED:
         print("[auto-scan] desativado por SKYSCANNER_AUTO_SCAN=0")
         return
@@ -405,11 +478,13 @@ def start_auto_scan_if_needed():
 
     t = threading.Thread(target=_auto_scan_loop, daemon=True)
     t.start()
-    start_user_scan_scheduler_if_needed()
     print(f"[auto-scan] ligado: intervalo {SCAN_INTERVAL_SECONDS}s + cron por usuário")
 
 
 def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
+    if _user_has_running_scan(conn, user_id):
+        return False
+
     row = conn.execute(
         "SELECT last_run_at, updated_at FROM user_cron WHERE user_id = ?",
         (user_id,),
@@ -507,11 +582,183 @@ def send_telegram_message_to(text: str, token: str | None = None, chat_id: str |
     requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=20).raise_for_status()
 
 
-def send_telegram_message(text: str) -> None:
+def _load_font(size: int, bold: bool = False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _group_scan_rows_for_image(rows: list[dict]) -> list[tuple[str, list[dict]]]:
+    idas = [
+        r for r in rows
+        if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"
+    ]
+    voltas = [r for r in rows if str(r.get("destination", "")).upper() == "PVH"]
+
+    idas_ok = sorted([r for r in idas if r.get("price") is not None], key=lambda r: float(r["price"]))
+    voltas_ok = sorted([r for r in voltas if r.get("price") is not None], key=lambda r: float(r["price"]))
+
+    groups = []
+    if idas_ok:
+        groups.append(("IDAS", idas_ok))
+    if voltas_ok:
+        groups.append(("VOLTAS PARA PVH", voltas_ok))
+    return groups
+
+
+def _best_vendor_label(row: dict) -> str:
+    vendor = (row.get("best_vendor") or row.get("site") or "").strip()
+    if not vendor:
+        vendor = "N/D"
+    vendor_price = row.get("best_vendor_price")
+    if isinstance(vendor_price, (int, float)):
+        return f"{vendor} ({format_brl(vendor_price)})"
+    return vendor
+
+
+def build_scan_results_image(rows: list[dict]) -> str | None:
+    groups = _group_scan_rows_for_image(rows)
+    if not groups:
+        return None
+
+    title_font = _load_font(22, bold=True)
+    header_font = _load_font(18, bold=True)
+    body_font = _load_font(18)
+    small_font = _load_font(15)
+
+    padding_x = 18
+    padding_y = 16
+    row_h = 40
+    section_h = 36
+    title_h = 34
+    meta_h = 28
+    col_widths = [170, 140, 140, 290]
+    headers = ["Rota", "Data voo", "Preço", "Onde comprar mais barato"]
+    table_w = sum(col_widths)
+    width = table_w + padding_x * 2
+
+    row_count = sum(len(items) for _, items in groups)
+    height = (
+        padding_y * 2
+        + title_h
+        + meta_h
+        + row_h
+        + sum(section_h + len(items) * row_h for _, items in groups)
+        + 24
+    )
+
+    image = Image.new("RGB", (width, height), "#f4f6f8")
+    draw = ImageDraw.Draw(image)
+
+    colors = {
+        "text": "#1f2937",
+        "muted": "#6b7280",
+        "header_bg": "#e5e7eb",
+        "section_bg": "#d1d5db",
+        "section_return_bg": "#f4e7bd",
+        "border": "#cbd5e1",
+        "row_a": "#ffffff",
+        "row_b": "#f8fafc",
+        "price": "#0f8a5f",
+        "date_badge": "#dbeafe",
+        "date_badge_return": "#fef3c7",
+    }
+
+    x0 = padding_x
+    y = padding_y
+    draw.text((x0, y), "Consulta completa", font=title_font, fill=colors["text"])
+    y += title_h
+    draw.text((x0, y), datetime.now().strftime("%Y-%m-%d %H:%M"), font=small_font, fill=colors["muted"])
+    y += meta_h
+
+    x = x0
+    for idx, header in enumerate(headers):
+        w = col_widths[idx]
+        draw.rectangle([x, y, x + w, y + row_h], fill=colors["header_bg"], outline=colors["border"])
+        draw.text((x + 12, y + 10), header, font=header_font, fill=colors["text"])
+        x += w
+    y += row_h
+
+    for group_idx, (title, items) in enumerate(groups):
+        section_bg = colors["section_return_bg"] if title.startswith("VOLTAS") else colors["section_bg"]
+        draw.rectangle([x0, y, x0 + table_w, y + section_h], fill=section_bg, outline=colors["border"])
+        caption = f"{title} (menor → maior preço)"
+        caption_bbox = draw.textbbox((0, 0), caption, font=header_font)
+        draw.text((x0 + table_w - (caption_bbox[2] - caption_bbox[0]) - 12, y + 8), caption, font=header_font, fill=colors["text"])
+        y += section_h
+
+        for item_idx, row in enumerate(items):
+            fill = colors["row_a"] if item_idx % 2 == 0 else colors["row_b"]
+            draw.rectangle([x0, y, x0 + table_w, y + row_h], fill=fill, outline=colors["border"])
+
+            route = f"{row.get('origin', '')} \u2192 {row.get('destination', '')}"
+            date_txt = str(row.get("outbound_date") or "")
+            price_txt = row.get("price_fmt") or format_brl(row.get("price"))
+            vendor_txt = _best_vendor_label(row)
+
+            draw.text((x0 + 12, y + 10), route, font=body_font, fill=colors["text"])
+
+            date_x = x0 + col_widths[0] + 12
+            badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
+            badge_bbox = draw.textbbox((0, 0), date_txt, font=small_font)
+            badge_w = (badge_bbox[2] - badge_bbox[0]) + 18
+            draw.rounded_rectangle([date_x, y + 8, date_x + badge_w, y + 30], radius=8, fill=badge_fill)
+            draw.text((date_x + 9, y + 11), date_txt, font=small_font, fill=colors["text"])
+
+            price_x = x0 + col_widths[0] + col_widths[1] + 12
+            draw.text((price_x, y + 10), price_txt, font=header_font, fill=colors["price"])
+
+            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + 12
+            draw.text((vendor_x, y + 10), vendor_txt[:40], font=body_font, fill=colors["text"])
+            y += row_h
+
+        if group_idx != len(groups) - 1:
+            y += 10
+
+    tmp = NamedTemporaryFile(prefix="telegram_scan_", suffix=".png", delete=False)
+    tmp.close()
+    image.save(tmp.name, format="PNG")
+    return tmp.name
+
+
+def send_telegram_photo_to(image_path: str, caption: str | None = None, token: str | None = None, chat_id: str | None = None) -> None:
+    token = token or os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
+    chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
+    if not token or not chat_id or not image_path or not os.path.exists(image_path):
+        return
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    with open(image_path, "rb") as image_file:
+        requests.post(
+            url,
+            data={"chat_id": chat_id, "caption": caption or ""},
+            files={"photo": image_file},
+            timeout=60,
+        ).raise_for_status()
+
+
+def send_telegram_message(text: str, image_rows: list[dict] | None = None) -> None:
     send_telegram_message_to(text)
+    image_path = build_scan_results_image(image_rows or [])
+    if not image_path:
+        return
+    try:
+        send_telegram_photo_to(image_path)
+    finally:
+        try:
+            os.remove(image_path)
+        except OSError:
+            pass
 
 
-def send_user_telegram_message(user_id: int, text: str) -> None:
+def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] | None = None) -> None:
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     try:
@@ -525,8 +772,17 @@ def send_user_telegram_message(user_id: int, text: str) -> None:
         chat_id = (row["chat_id"] or "").strip()
         if not token or not chat_id:
             return
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=20).raise_for_status()
+        send_telegram_message_to(text, token=token, chat_id=chat_id)
+        image_path = build_scan_results_image(image_rows or [])
+        if not image_path:
+            return
+        try:
+            send_telegram_photo_to(image_path, token=token, chat_id=chat_id)
+        finally:
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
     finally:
         conn.close()
 
@@ -589,6 +845,47 @@ def normalize_maxmilhas_history() -> int:
         db.conn.commit()
     return updated
 
+
+def get_user_max_display_price(user_id: int | None) -> float | None:
+    if not user_id:
+        return None
+    conn = sqlite3.connect(auth_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT max_price_display FROM user_cron WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        value = row["max_price_display"]
+        if value is None:
+            return None
+        return float(value)
+    finally:
+        conn.close()
+
+
+def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[dict]:
+    if max_price is None:
+        return rows
+    return [
+        row for row in rows
+        if row.get("price") is None or float(row["price"]) <= max_price
+    ]
+
+
+def get_global_max_price_limit() -> float | None:
+    conn = sqlite3.connect(auth_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT max_price_display FROM user_cron WHERE max_price_display IS NOT NULL"
+        ).fetchall()
+        values = [float(row["max_price_display"]) for row in rows if row["max_price_display"] is not None]
+        return min(values) if values else None
+    finally:
+        conn.close()
 
 
 def _to_route(query_args) -> RouteQuery:
@@ -668,6 +965,9 @@ def consulta():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    user = current_user()
+    max_price = get_user_max_display_price(int(user["id"])) if user else None
+
     db = Database(get_db_path())
     requested_sources = _resolve_requested_sources(request.args, route)
     if not requested_sources:
@@ -699,6 +999,10 @@ def consulta():
 
     if not results:
         return jsonify({"error": "Nenhum resultado foi retornado para a rota consultada."}), 502
+
+    results = filter_rows_by_max_price(results, max_price)
+    if not results:
+        return jsonify({"error": "Nenhum resultado está dentro do valor máximo configurado."}), 200
 
     chosen = min(
         results,
@@ -790,6 +1094,9 @@ def historico():
     items = [dict(r) for r in rows]
     for item in items:
         item["final_price_source"] = extract_final_price_source(item.get("notes"))
+    user = current_user()
+    max_price = get_user_max_display_price(int(user["id"])) if user else None
+    items = filter_rows_by_max_price(items, max_price)
     return jsonify({"total": len(items), "items": items})
 
 
@@ -804,13 +1111,18 @@ def limpar_historico():
 @app.route("/cron", methods=["GET"])
 def cron():
     parsed = run_full_scan()
-    notify_full_scan(parsed, trigger="manual")
-    return jsonify({"status": "ok", "resultados": parsed, "last_run_at": _scan_last_run_at})
+    user = current_user()
+    max_price = get_user_max_display_price(int(user["id"])) if user else None
+    parsed_filtered = filter_rows_by_max_price(parsed, max_price)
+    notify_full_scan(parsed, trigger="manual", max_price=max_price)
+    return jsonify({"status": "ok", "resultados": parsed_filtered, "last_run_at": _scan_last_run_at})
 
 
 @app.route("/cron-stream", methods=["GET"])
 def cron_stream():
     def event_stream():
+        user = current_user()
+        max_price = get_user_max_display_price(int(user["id"])) if user else None
         routes = build_db_queries(get_db_path())
         total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
         yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
@@ -831,21 +1143,23 @@ def cron_stream():
                     result = _search_google_result(scraper, route)
                     row = _store_result(db, route, result)
                     parsed.append(row)
-                    payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
-                    yield f"data: {json.dumps(payload)}\n\n"
-                    time.sleep(0.05)
+                    if row.get("price") is None or max_price is None or float(row["price"]) <= max_price:
+                        payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        time.sleep(0.05)
 
                     maxmilhas_result = _search_maxmilhas_result(p, route)
                     if maxmilhas_result is not None:
                         row = _store_result(db, route, maxmilhas_result)
                         parsed.append(row)
-                        payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
-                        yield f"data: {json.dumps(payload)}\n\n"
-                        time.sleep(0.05)
+                        if row.get("price") is None or max_price is None or float(row["price"]) <= max_price:
+                            payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
+                            yield f"data: {json.dumps(payload)}\n\n"
+                            time.sleep(0.05)
 
                 browser.close()
 
-            notify_full_scan(parsed, trigger="completa")
+            notify_full_scan(parsed, trigger="completa", max_price=max_price)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -935,9 +1249,9 @@ def _ensure_user_cron_defaults(conn, user_id: int) -> None:
     if exists:
         return
     schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-    every_hours = max(1, min(24, round(schedule_minutes / 60)))
+    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
     now = _current_iso_ts()
-    conn.execute("INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, updated_at, last_run_at) VALUES (?, 1, ?, ?, ?, ?)",
+    conn.execute("INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at, last_run_at) VALUES (?, 1, ?, ?, NULL, ?, ?)",
         (user_id, every_hours, schedule_minutes, now, now),
     )
     conn.commit()
@@ -998,6 +1312,7 @@ def init_auth_tables():
             enabled INTEGER DEFAULT 1,
             every_hours INTEGER DEFAULT 3,
             schedule_minutes INTEGER DEFAULT 60,
+            max_price_display REAL,
             updated_at TEXT NOT NULL,
             last_run_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -1021,6 +1336,7 @@ def init_auth_tables():
     for ddl in [
         "ALTER TABLE user_cron ADD COLUMN last_run_at TEXT",
         "ALTER TABLE user_cron ADD COLUMN schedule_minutes INTEGER",
+        "ALTER TABLE user_cron ADD COLUMN max_price_display REAL",
         "ALTER TABLE user_runs ADD COLUMN trigger TEXT DEFAULT 'manual-user'",
     ]:
         try:
@@ -1029,7 +1345,8 @@ def init_auth_tables():
             pass
 
     try:
-        cur.execute("UPDATE user_cron SET schedule_minutes = COALESCE(schedule_minutes, every_hours * 60, ?) WHERE schedule_minutes IS NULL", (DEFAULT_SCHEDULE_MINUTES,))
+        cur.execute("UPDATE user_cron SET schedule_minutes = COALESCE(schedule_minutes, CASE WHEN every_hours > 0 THEN every_hours * 60 END, ?) WHERE schedule_minutes IS NULL", (DEFAULT_SCHEDULE_MINUTES,))
+        cur.execute("UPDATE user_cron SET every_hours = 0 WHERE schedule_minutes < 60")
     except sqlite3.OperationalError:
         pass
 
@@ -1185,14 +1502,17 @@ def painel():
         (user["id"],),
     ).fetchall()
     tg = db.execute("SELECT bot_token, chat_id FROM user_telegram WHERE user_id = ?", (user["id"],)).fetchone()
-    cron = db.execute("SELECT enabled, every_hours, schedule_minutes FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
+    cron = db.execute("SELECT enabled, every_hours, schedule_minutes, max_price_display FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
     cron_minutes = DEFAULT_SCHEDULE_MINUTES
+    cron_max_price = ""
     if cron is not None:
         schedule_minutes = cron["schedule_minutes"]
         if schedule_minutes is not None:
             cron_minutes = int(schedule_minutes)
         elif cron["every_hours"] is not None:
             cron_minutes = max(1, int(cron["every_hours"]) * 60)
+        if cron["max_price_display"] is not None:
+            cron_max_price = str(int(cron["max_price_display"])) if float(cron["max_price_display"]).is_integer() else str(cron["max_price_display"])
     last_run = db.execute("SELECT started_at, finished_at, status, summary FROM user_runs WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user["id"],)).fetchone()
     default_tg_bot = os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token", "")
     default_tg_chat = os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id", "")
@@ -1347,6 +1667,7 @@ def painel():
                           <label class='form-label small text-uppercase'>Origem</label>
                           <select id='origin' class='form-select form-select-sm'>
                             <option value='PVH' selected>PVH — Porto Velho (RO)</option>
+                            <option value='BPS'>BPS — Porto Seguro (BA)</option>
                             <option value='RIO'>RIO — Rio de Janeiro (RJ)</option>
                             <option value='SAO'>SAO — São Paulo (SP)</option>
                             <option value='BSB'>BSB — Brasília (DF)</option>
@@ -1379,6 +1700,7 @@ def painel():
                           <label class='form-label small text-uppercase'>Destino</label>
                           <select id='destination' class='form-select form-select-sm'>
                             <option value='JPA' selected>JPA — João Pessoa (PB)</option>
+                            <option value='BPS'>BPS — Porto Seguro (BA)</option>
                             <option value='REC'>REC — Recife (PE)</option>
                             <option value='NAT'>NAT — Natal (RN)</option>
                             <option value='SLZ'>SLZ — São Luís (MA)</option>
@@ -1548,6 +1870,7 @@ def painel():
                         <label class='form-check-label' for='enabled'>Ativo</label>
                       </div>
                       <div class='col-md-3'><input class='form-control' name='schedule_minutes' type='number' min='1' max='1440' step='1' value='{{ cron_minutes }}'></div>
+                      <div class='col-md-4'><input class='form-control' name='max_price_display' type='number' min='0' step='0.01' placeholder='Preço máximo exibido por trecho' value='{{ cron_max_price }}'></div>
                       <div class='col-md-2 d-grid'><button class='btn btn-primary' type='submit'>Salvar</button></div>
                     </form>
                     <form method='post' action='{{ url_for("run_now_user") }}' class='mt-3'>
@@ -1615,6 +1938,7 @@ def painel():
         tg=tg,
         cron=cron,
         cron_minutes=cron_minutes,
+        cron_max_price=cron_max_price,
         last_run=last_run,
         default_tg_bot=default_tg_bot,
         default_tg_chat=default_tg_chat,
@@ -1715,19 +2039,23 @@ def save_cron():
     user = current_user()
     enabled = 1 if request.form.get("enabled") else 0
     schedule_minutes = max(1, min(1440, int(request.form.get("schedule_minutes", DEFAULT_SCHEDULE_MINUTES))))
-    hours_from_minutes = (schedule_minutes + 59) // 60
-    every_hours = max(1, min(24, hours_from_minutes))
+    max_price_display_raw = request.form.get("max_price_display", "").strip()
+    max_price_display = None
+    if max_price_display_raw:
+        max_price_display = max(0.0, float(max_price_display_raw))
+    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
     db.execute(
         """
-        INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
           enabled = excluded.enabled,
           every_hours = excluded.every_hours,
           schedule_minutes = excluded.schedule_minutes,
+          max_price_display = excluded.max_price_display,
           updated_at = excluded.updated_at
         """,
-        (user["id"], enabled, every_hours, schedule_minutes, datetime.now().isoformat()),
+        (user["id"], enabled, every_hours, schedule_minutes, max_price_display, datetime.now().isoformat()),
     )
     db.commit()
     return redirect(url_for("painel", _anchor="cron"))

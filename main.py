@@ -6,6 +6,9 @@ from tempfile import NamedTemporaryFile
 import json
 import os
 import re
+import shlex
+import subprocess
+import sys
 import time
 import random
 import requests
@@ -31,6 +34,20 @@ from skyscanner import (
     parse_price_brl,
     sync_playwright,
 )
+
+CITY_HIGHLIGHT_EMOJIS = {
+    "NAT": "🟡",
+    "FOR": "🔵",
+    "REC": "🟢",
+    "JPA": "🟣",
+}
+
+CITY_HIGHLIGHT_COLORS = {
+    "NAT": "#fbbf24",
+    "FOR": "#60a5fa",
+    "REC": "#34d399",
+    "JPA": "#a855f7",
+}
 from maxmilhas import (
     buscar_menor_preco as buscar_menor_preco_maxmilhas,
     filtrar_precos_parcelados,
@@ -45,6 +62,7 @@ DEFAULT_SCHEDULE_MINUTES = max(1, int(CONFIG.get("schedule_minutes", DEFAULT_SCA
 SCAN_INTERVAL_SECONDS = int(os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", str(DEFAULT_SCAN_INTERVAL)))
 AUTO_SCAN_ENABLED = os.getenv("SKYSCANNER_AUTO_SCAN", "1") == "1"
 USER_SCAN_POLL_SECONDS = int(os.getenv("SKYSCANNER_USER_SCAN_POLL_SECONDS", "60"))
+PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
 _scan_lock = threading.Lock()
 _scan_last_run_at = None
 _user_scheduler_started = False
@@ -79,6 +97,39 @@ AIRPORT_OPTIONS = [
     ("MCP", "MCP — Macapá (AP)"),
     ("PMW", "PMW — Palmas (TO)"),
 ]
+
+
+def build_restart_redirect(message: str, level: str = "info"):
+    return redirect(url_for("painel", _anchor="cron", restart_status=level, restart_message=message))
+
+
+def trigger_service_restart() -> tuple[bool, str, bool]:
+    command = PANEL_RESTART_COMMAND
+    if command:
+        try:
+            completed = subprocess.run(
+                shlex.split(command),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if completed.returncode != 0:
+                error_details = (completed.stderr or completed.stdout or "").strip()
+                suffix = f" Detalhes: {error_details}" if error_details else ""
+                return False, f"Falha ao executar reinício.{suffix}", False
+            return True, "Comando de reinício executado.", False
+        except Exception as exc:
+            return False, f"Falha ao executar reinício: {exc}", False
+
+    if os.getenv("WERKZEUG_RUN_MAIN") == "true":
+        return False, "Reinício pelo próprio processo não é suportado com o reloader do Flask.", False
+
+    try:
+        python_bin = sys.executable
+        subprocess.Popen([python_bin, *sys.argv], cwd=os.getcwd(), start_new_session=True)
+        return True, "Novo processo iniciado. O processo atual será encerrado.", True
+    except Exception as exc:
+        return False, f"Falha ao iniciar novo processo: {exc}", False
 
 
 def date_color_token(date_iso: str | None) -> tuple[str, str]:
@@ -128,7 +179,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         "novo": "🔵",
     }
 
-    def _format_direction(rows: list[dict], best_row: dict | None, section_title: str) -> list[str]:
+    def _format_direction(rows: list[dict], best_row: dict | None, section_title: str, highlight_axis: str) -> list[str]:
         if not rows:
             return [section_title, "N/D"]
 
@@ -149,8 +200,13 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
                 vendor = (row.get("best_vendor") or "").strip()
                 vendor_txt = f" | vendedor: {vendor}" if vendor else ""
                 best_note = " | melhor preço" if is_best else ""
+                highlight_value = (row.get(highlight_axis) or "").upper()
+                highlight_icon = CITY_HIGHLIGHT_EMOJIS.get(highlight_value, "")
+                route_label = f"{row.get('origin')}→{row.get('destination')}"
+                if highlight_icon:
+                    route_label = f"{route_label} {highlight_icon}"
                 section_lines.append(
-                    f"{row.get('origin')}→{row.get('destination')} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}{best_note}"
+                    f"{route_label} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}{best_note}"
                 )
             if date_idx != len(ordered_dates) - 1:
                 section_lines.append("")
@@ -172,9 +228,9 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",
         f"Execução: {trigger}",
         "",
-        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, "IDAS (PVH -> destino):")),
+        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, "IDAS (PVH -> destino):", "destination")),
         "",
-        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, "VOLTAS (destino -> PVH):")),
+        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, "VOLTAS (destino -> PVH):", "origin")),
     ]
 
     total_ok = len([r for r in parsed if r.get("price") is not None])
@@ -261,6 +317,31 @@ def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | No
 
     ok = bool(resultado and resultado.get("ok"))
     menor_preco = resultado.get("menor_preco") if resultado else None
+    filtered_threshold = None
+    final_threshold = None
+    if ok and resultado:
+        valores = []
+        for raw in resultado.get("precos_encontrados") or []:
+            try:
+                valores.append(float(raw))
+            except (TypeError, ValueError):
+                pass
+        valores = sorted(set(valores))
+        limiar = float(CONFIG.get("maxmilhas_min_price", 400))
+        candidatos = [valor for valor in valores if valor >= limiar]
+        total_limit = float(CONFIG.get("maxmilhas_final_price_threshold", 1000))
+        selected_price = None
+        if candidatos:
+            for price in candidatos:
+                if price >= total_limit:
+                    selected_price = price
+                    break
+            if selected_price is None:
+                selected_price = candidatos[-1]
+        if selected_price is not None:
+            menor_preco = selected_price
+            filtered_threshold = limiar
+            final_threshold = total_limit
     vendedor = "MaxMilhas" if ok and menor_preco is not None else ""
     notes_parts = []
     if resultado:
@@ -271,6 +352,10 @@ def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | No
         if ok and menor_preco is not None:
             notes_parts.append("final_price_source=maxmilhas")
             notes_parts.append(f"precos={resultado.get('precos_encontrados', [])}")
+            if filtered_threshold is not None:
+                notes_parts.append(f"maxmilhas_min_price={filtered_threshold}")
+            if final_threshold is not None:
+                notes_parts.append(f"maxmilhas_final_price_threshold={final_threshold}")
 
     return FlightResult(
         site="maxmilhas",
@@ -692,19 +777,27 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
         draw.rectangle([x0, y, x0 + table_w, y + section_h], fill=section_bg, outline=colors["border"])
         caption = f"{title} (menor → maior preço)"
         caption_bbox = draw.textbbox((0, 0), caption, font=header_font)
-        draw.text((x0 + table_w - (caption_bbox[2] - caption_bbox[0]) - 12, y + 8), caption, font=header_font, fill=colors["text"])
+        caption_width = caption_bbox[2] - caption_bbox[0]
+        caption_x = x0 + max(0, (table_w - caption_width) / 2)
+        draw.text((caption_x, y + 8), caption, font=header_font, fill=colors["text"])
         y += section_h
 
+        highlight_axis = "destination" if title.startswith("IDAS") else "origin"
         for item_idx, row in enumerate(items):
             fill = colors["row_a"] if item_idx % 2 == 0 else colors["row_b"]
             draw.rectangle([x0, y, x0 + table_w, y + row_h], fill=fill, outline=colors["border"])
 
-            route = f"{row.get('origin', '')} \u2192 {row.get('destination', '')}"
+            route = f"{row.get('origin', '')} → {row.get('destination', '')}"
+            highlight_value = (row.get(highlight_axis) or "").upper()
+            route_fill = CITY_HIGHLIGHT_COLORS.get(highlight_value, colors["text"])
+            highlight_icon = CITY_HIGHLIGHT_EMOJIS.get(highlight_value, "")
+            if highlight_icon:
+                route = f"{route} {highlight_icon}"
             date_txt = str(row.get("outbound_date") or "")
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
-            draw.text((x0 + 12, y + 10), route, font=body_font, fill=colors["text"])
+            draw.text((x0 + 12, y + 10), route, font=body_font, fill=route_fill)
 
             date_x = x0 + col_widths[0] + 12
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
@@ -722,7 +815,6 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
 
         if group_idx != len(groups) - 1:
             y += 10
-
     tmp = NamedTemporaryFile(prefix="telegram_scan_", suffix=".png", delete=False)
     tmp.close()
     image.save(tmp.name, format="PNG")
@@ -1496,6 +1588,8 @@ def auth_logout():
 def painel():
     db = get_auth_db()
     user = current_user()
+    restart_status = (request.args.get("restart_status") or "").strip().lower()
+    restart_message = (request.args.get("restart_message") or "").strip()
     ensure_user_defaults(db, user["id"])
     routes = db.execute(
         "SELECT id, origin, destination, outbound_date, inbound_date, active FROM user_routes WHERE user_id = ? ORDER BY id DESC",
@@ -1565,6 +1659,9 @@ def painel():
                   </div>
                 </div>
                 <div class='p-4'>
+                {% if restart_message %}
+                  <div class='alert alert-{% if restart_status == "success" %}success{% else %}danger{% endif %} mb-3'>{{ restart_message }}</div>
+                {% endif %}
                 <div class='row g-3 mb-3'>
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Rotas</div><div class='h4 mb-0'>{{ routes|length }}</div></div></div></div>
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Cron</div><div class='h6 mb-0'>{% if not cron or cron['enabled'] %}Ativo{% else %}Inativo{% endif %} ({{ cron_minutes }} min)</div></div></div></div>
@@ -1876,6 +1973,16 @@ def painel():
                     <form method='post' action='{{ url_for("run_now_user") }}' class='mt-3'>
                       <button class='btn btn-warning' type='submit'>Executar agora</button>
                     </form>
+                    <form method='post' action='{{ url_for("restart_service") }}' class='mt-2' onsubmit='return confirm("Reiniciar o serviço agora?");'>
+                      <button class='btn btn-outline-danger' type='submit'>Reiniciar serviço</button>
+                    </form>
+                    <div class='small text-muted mt-2'>
+                      {% if restart_command_configured %}
+                        O painel usará o comando configurado em <code>SKYSCANNER_RESTART_COMMAND</code>.
+                      {% else %}
+                        Nenhum comando de reinício configurado. O painel tentará reabrir o processo Python atual.
+                      {% endif %}
+                    </div>
                     <div class='mt-3'><strong>Última execução:</strong><br>
                       {% if last_run %}
                         {{last_run['started_at']}} → {{last_run['finished_at']}} | {{last_run['status']}} | {{last_run['summary']}}
@@ -1943,6 +2050,7 @@ def painel():
         default_tg_bot=default_tg_bot,
         default_tg_chat=default_tg_chat,
         airport_options=AIRPORT_OPTIONS,
+        restart_command_configured=bool(PANEL_RESTART_COMMAND),
     )
 
 
@@ -2030,6 +2138,22 @@ def run_now_user():
     user = current_user()
     run_user_scan(int(user["id"]), trigger="painel-manual", notify=True)
     return redirect(url_for("painel", _anchor="cron"))
+
+
+@app.route("/painel/restart", methods=["POST"])
+@login_required
+def restart_service():
+    ok, message, should_exit = trigger_service_restart()
+    if not ok:
+        return build_restart_redirect(message, level="error")
+
+    if should_exit:
+        def _shutdown_later():
+            time.sleep(1)
+            os._exit(0)
+
+        threading.Thread(target=_shutdown_later, daemon=True).start()
+    return build_restart_redirect(message, level="success")
 
 
 @app.route("/painel/cron", methods=["POST"])

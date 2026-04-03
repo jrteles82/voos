@@ -217,8 +217,25 @@
             inbound_date: document.getElementById('inbound_date').value,
           });
 
-          const res = await fetch(`/consulta?${params.toString()}`);
-          const data = await res.json();
+          const res = await fetch(`/consulta?${params.toString()}`, {
+            headers: { Accept: 'application/json' },
+          });
+          const contentType = res.headers.get('content-type') || '';
+          let data = null;
+
+          if (contentType.includes('application/json')) {
+            data = await res.json();
+          } else {
+            const text = await res.text();
+            if (res.redirected || /<html/i.test(text)) {
+              throw new Error('Sua sessão expirou. Faça login novamente.');
+            }
+            throw new Error(`Resposta inesperada do servidor (${res.status}).`);
+          }
+
+          if (!res.ok && !data?.error) {
+            throw new Error(`Falha na consulta (${res.status}).`);
+          }
 
           if (data.error) {
             body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">${data.error}</td></tr>`;
@@ -254,7 +271,8 @@
 
           historico();
         } catch (e) {
-          body.innerHTML = '<tr><td colspan="7" class="text-center text-danger">Erro ao consultar.</td></tr>';
+          const message = e && e.message ? e.message : 'Erro ao consultar.';
+          body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">${message}</td></tr>`;
         } finally {
           btn.disabled = false;
         }
@@ -298,10 +316,29 @@
         const btn = document.getElementById('btn-cron');
         const loading = document.getElementById('cron-loading');
         const body = document.getElementById('cron-body');
+        const progressWrap = document.getElementById('cron-progress-wrap');
+        const progressBar = document.getElementById('cron-progress-bar');
+        const currentRoute = document.getElementById('cron-current-route');
+
+        function setCronProgress(index, total, routeText) {
+          const safeTotal = Math.max(1, Number(total || 0));
+          const safeIndex = Math.max(0, Math.min(Number(index || 0), safeTotal));
+          const percent = Math.round((safeIndex / safeTotal) * 100);
+          progressWrap.style.display = 'block';
+          progressBar.style.width = `${percent}%`;
+          progressBar.textContent = `${percent}%`;
+          progressBar.setAttribute('aria-valuenow', String(percent));
+          if (routeText) currentRoute.textContent = routeText;
+        }
 
         btn.disabled = true;
         loading.style.display = 'block';
         loading.textContent = 'Iniciando busca...';
+        progressWrap.style.display = 'none';
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        progressBar.setAttribute('aria-valuenow', '0');
+        currentRoute.textContent = 'Preparando busca...';
         body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Iniciando busca...</td></tr>';
 
         let started = false;
@@ -358,7 +395,16 @@
 
             if (msg.type === 'start') {
               loading.textContent = `Buscando rotas... 0/${msg.total}`;
+              setCronProgress(0, msg.total, 'Preparando busca...');
               body.innerHTML = '';
+              return;
+            }
+
+            if (msg.type === 'progress') {
+              const route = msg.route || {};
+              const routeLabel = `${safe(route.origin)} → ${safe(route.destination)} | ${safe(route.outbound_date)}${route.inbound_date ? ` / ${route.inbound_date}` : ''} | ${safe(msg.source)}`;
+              loading.textContent = `Buscando rotas... ${Math.max(0, (msg.index || 1) - 1)}/${msg.total}`;
+              setCronProgress(Math.max(0, (msg.index || 1) - 1), msg.total, `Consultando agora: ${routeLabel}`);
               return;
             }
 
@@ -369,6 +415,7 @@
               items.push(item);
               renderCronTable();
               loading.textContent = `Buscando rotas... ${msg.index}/${msg.total}`;
+              setCronProgress(msg.index, msg.total, `Resultado recebido: ${safe(item.origin)} → ${safe(item.destination)} | ${safe(item.site)}`);
               return;
             }
 
@@ -376,6 +423,7 @@
               es.close();
               btn.disabled = false;
               loading.style.display = 'none';
+              setCronProgress(1, 1, 'Busca concluída.');
               loading.textContent = 'Buscando rotas... isso pode levar alguns minutos.';
               if (!started) {
                 body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Sem resultados nesta execução.</td></tr>';
@@ -388,6 +436,7 @@
               es.close();
               btn.disabled = false;
               loading.style.display = 'none';
+              progressWrap.style.display = 'none';
               loading.textContent = 'Buscando rotas... isso pode levar alguns minutos.';
               body.innerHTML = `<tr><td colspan="7" class="text-center text-danger">${safe(msg.message, 'Erro ao executar busca completa.')}</td></tr>`;
               return;
@@ -399,6 +448,7 @@
           es.close();
           btn.disabled = false;
           loading.style.display = 'none';
+          progressWrap.style.display = 'none';
           loading.textContent = 'Buscando rotas... isso pode levar alguns minutos.';
           if (!started) {
             body.innerHTML = '<tr><td colspan="7" class="text-center text-danger">Erro ao executar busca completa.</td></tr>';

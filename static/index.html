@@ -118,6 +118,12 @@
           <button id='btn-cron' class='btn btn-warning btn-sm' onclick='executarCron()'>Executar busca completa</button>
         </div>
         <div id='cron-loading' class='text-muted mb-2' style='display:none;'>Buscando rotas... isso pode levar alguns minutos.</div>
+        <div id='cron-progress-wrap' class='mb-3' style='display:none;'>
+          <div class='progress mb-2' role='progressbar' aria-label='Progresso da busca completa' aria-valuemin='0' aria-valuemax='100'>
+            <div id='cron-progress-bar' class='progress-bar progress-bar-striped progress-bar-animated bg-warning text-dark' style='width:0%'>0%</div>
+          </div>
+          <div id='cron-current-route' class='small text-muted'>Preparando busca...</div>
+        </div>
         <div class='table-responsive'>
           <table class='table table-striped table-hover align-middle text-center' id='cron-table'>
             <thead>
@@ -706,5 +712,6 @@
       rotas();
       historico();
     </script>
+    <script src="/static/consulta-app.js"></script>
   </body>
 </html>

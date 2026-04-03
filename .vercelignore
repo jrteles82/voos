@@ -1,8 +1,0 @@
-.venv/
-.playwright-browsers/
-__pycache__/
-*.pyc
-*.pyo
-*.db
-.env
-.git/

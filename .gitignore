@@ -10,3 +10,4 @@ debug_*.png
 .env.hostinger.*
 !.env.hostinger.example
 flight_tracker_browser.db
+.playwright-browsers/

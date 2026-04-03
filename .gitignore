@@ -5,3 +5,8 @@ dist
 debug_*.html
 debug_*.png
 *_resultado.json
+.deploy-hostinger
+.env.hostinger
+.env.hostinger.*
+!.env.hostinger.example
+flight_tracker_browser.db

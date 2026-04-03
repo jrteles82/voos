@@ -1,10 +1,7 @@
 import dotenv from "dotenv";
 import path from "node:path";
-import fs from "node:fs";
 
 dotenv.config();
-
-const CONFIG_FILE = path.resolve(process.cwd(), "skyscanner-config.json");
 
 type ConfigShape = {
   origin: string;
@@ -56,34 +53,7 @@ const defaults: ConfigShape = {
   scan_workers: 2
 };
 
-function normalizeList(value: unknown): string[] {
-  if (typeof value === "string") {
-    return value.split(",").map((item) => item.trim()).filter(Boolean);
-  }
-  return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
-}
-
-function loadConfig(): ConfigShape {
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return defaults;
-  }
-
-  try {
-    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Record<string, unknown>;
-    return {
-      ...defaults,
-      ...raw,
-      destinations_br: normalizeList(raw.destinations_br ?? defaults.destinations_br),
-      destinations_sa: normalizeList(raw.destinations_sa ?? defaults.destinations_sa),
-      outbound_dates: normalizeList(raw.outbound_dates ?? defaults.outbound_dates),
-      inbound_dates: normalizeList(raw.inbound_dates ?? defaults.inbound_dates)
-    };
-  } catch {
-    return defaults;
-  }
-}
-
-export const config = loadConfig();
+export const config = defaults;
 export const appConfig = {
   host: process.env.HOST ?? "0.0.0.0",
   port: Number(process.env.PORT ?? 3000),

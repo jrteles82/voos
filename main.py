@@ -201,10 +201,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
                 vendor_txt = f" | vendedor: {vendor}" if vendor else ""
                 best_note = " | melhor preço" if is_best else ""
                 highlight_value = (row.get(highlight_axis) or "").upper()
-                highlight_icon = CITY_HIGHLIGHT_EMOJIS.get(highlight_value, "")
                 route_label = f"{row.get('origin')}→{row.get('destination')}"
-                if highlight_icon:
-                    route_label = f"{route_label} {highlight_icon}"
                 section_lines.append(
                     f"{route_label} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}{best_note}"
                 )
@@ -787,17 +784,19 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
             fill = colors["row_a"] if item_idx % 2 == 0 else colors["row_b"]
             draw.rectangle([x0, y, x0 + table_w, y + row_h], fill=fill, outline=colors["border"])
 
-            route = f"{row.get('origin', '')} → {row.get('destination', '')}"
+            origin_txt = row.get('origin', '')
+            destination_txt = row.get('destination', '')
             highlight_value = (row.get(highlight_axis) or "").upper()
-            route_fill = CITY_HIGHLIGHT_COLORS.get(highlight_value, colors["text"])
-            highlight_icon = CITY_HIGHLIGHT_EMOJIS.get(highlight_value, "")
-            if highlight_icon:
-                route = f"{route} {highlight_icon}"
+            highlight_color = CITY_HIGHLIGHT_COLORS.get(highlight_value, colors["text"])
+            destination_label = destination_txt
+            origin_part = f"{origin_txt} → "
+            draw.text((x0 + 12, y + 10), origin_part, font=body_font, fill=colors["text"])
+            dest_x = x0 + 12 + draw.textlength(origin_part, font=body_font)
+            draw.text((dest_x, y + 10), destination_label, font=body_font, fill=highlight_color)
+
             date_txt = str(row.get("outbound_date") or "")
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
-
-            draw.text((x0 + 12, y + 10), route, font=body_font, fill=route_fill)
 
             date_x = x0 + col_widths[0] + 12
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]

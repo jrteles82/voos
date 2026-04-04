@@ -6,12 +6,12 @@ import { ensurePlaywrightInstalled } from "./playwrightRuntime";
 import { ScanRow } from "./types";
 
 const PRICE_BAND_COLORS: Record<string, string> = {
-  excelente: "🟢",
-  bom: "🟡",
-  normal: "🔵",
-  caro: "🟤",
-  sem_preco: "⚪️",
-  novo: "🔵"
+  excelente: "VERDE",
+  bom: "AMARELO",
+  normal: "AZUL",
+  caro: "MARROM",
+  sem_preco: "SEM PRECO",
+  novo: "AZUL"
 };
 
 type SectionGroup = {
@@ -113,14 +113,14 @@ export function buildFullScanMessage(rows: ScanRow[], trigger = "manual"): strin
       }
 
       for (const [dateIndex, date] of [...grouped.keys()].sort().entries()) {
-        lines.push(date ? `📅 ${date}` : "📅 data pendente");
+        lines.push(date ? `Data ${date}` : "Data pendente");
         for (const row of grouped.get(date) ?? []) {
           const vendor = bestVendorLabel(row);
           const vendorText = vendor ? ` | vendedor: ${vendor}` : "";
           const rowKey = `${row.origin}|${row.destination}|${row.outbound_date}`;
           const bestNote = rowKey === bestKey ? " | melhor preço" : "";
           lines.push(
-            `${row.origin}→${row.destination} | ${PRICE_BAND_COLORS[row.price_band?.toLowerCase()] ?? "🔵"} ${row.outbound_date} | ${row.price_fmt}${vendorText}${bestNote}`
+            `${row.origin}->${row.destination} | ${PRICE_BAND_COLORS[row.price_band?.toLowerCase()] ?? "AZUL"} ${row.outbound_date} | ${row.price_fmt}${vendorText}${bestNote}`
           );
         }
         if (dateIndex !== grouped.size - 1) {
@@ -192,6 +192,7 @@ export async function buildScanResultsImage(rows: ScanRow[], title = "Consulta c
     minute: "2-digit"
   }).format(new Date());
 
+  const safeTitle = title.replace(/[^\x20-\x7E\u00A0-\u024F]/g, "");
   const html = `
     <!doctype html>
     <html lang="pt-BR">
@@ -201,7 +202,7 @@ export async function buildScanResultsImage(rows: ScanRow[], title = "Consulta c
           body {
             margin: 0;
             background: #eef2f6;
-            font-family: Arial, sans-serif;
+            font-family: "DejaVu Sans", "Liberation Sans", "Noto Sans", sans-serif;
             color: #243041;
           }
           .wrap {
@@ -279,7 +280,7 @@ export async function buildScanResultsImage(rows: ScanRow[], title = "Consulta c
       </head>
       <body>
         <div class="wrap">
-          <h1>${title}</h1>
+          <h1>${safeTitle}</h1>
           <div class="subtitle">${timestamp}</div>
           ${renderRows(sections[0].rows, "IDAS (menor → maior preço):", "destination", "outbound")}
           ${renderRows(sections[1].rows, "VOLTAS PARA PVH (menor → maior preço):", "origin", "inbound")}

@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-.playwright-browsers} npx playwright install chromium",
     "deploy:hostinger": "./scripts/deploy-hostinger.sh"
   },
   "repository": {

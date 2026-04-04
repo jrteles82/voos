@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
+import { ensurePlaywrightBrowsersPath } from "./playwrightRuntime";
 import { ScanRow } from "./types";
 
 const PRICE_BAND_COLORS: Record<string, string> = {
@@ -287,6 +288,7 @@ export async function buildScanResultsImage(rows: ScanRow[], title = "Consulta c
     </html>
   `;
 
+  ensurePlaywrightBrowsersPath();
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 796, height: 1200 }, deviceScaleFactor: 1 });

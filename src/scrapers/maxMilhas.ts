@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { config } from "../config";
+import { ensurePlaywrightBrowsersPath } from "../playwrightRuntime";
 import { FlightResult, RouteQuery } from "../types";
 
 function buildMaxMilhasUrl(route: RouteQuery): string {
@@ -28,6 +29,7 @@ export async function searchMaxMilhas(route: RouteQuery): Promise<FlightResult |
     return null;
   }
 
+  ensurePlaywrightBrowsersPath();
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]

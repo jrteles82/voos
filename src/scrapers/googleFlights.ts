@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { config } from "../config";
+import { ensurePlaywrightBrowsersPath } from "../playwrightRuntime";
 import { FlightResult, RouteQuery } from "../types";
 import { formatBrl } from "../utils";
 
@@ -23,6 +24,7 @@ function parsePrice(raw: string): number | null {
 }
 
 export async function searchGoogleFlights(route: RouteQuery): Promise<FlightResult> {
+  ensurePlaywrightBrowsersPath();
   const browser = await chromium.launch({ headless: Boolean(config.headless) });
   let context: BrowserContext | null = null;
   let screenshotPath: string | undefined;

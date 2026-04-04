@@ -1,7 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 let configured = false;
+let installPromise: Promise<void> | null = null;
 
 function firstExistingDirectory(paths: string[]): string | undefined {
   for (const candidate of paths) {
@@ -14,20 +19,41 @@ function firstExistingDirectory(paths: string[]): string | undefined {
 }
 
 export function ensurePlaywrightBrowsersPath(): void {
-  if (configured || process.env.PLAYWRIGHT_BROWSERS_PATH) {
+  if (configured && process.env.PLAYWRIGHT_BROWSERS_PATH) {
+    return;
+  }
+
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
     configured = true;
     return;
   }
 
-  const browserPath = firstExistingDirectory([
-    path.resolve(process.cwd(), ".playwright-browsers"),
-    path.resolve(__dirname, "..", ".playwright-browsers"),
-    path.resolve(process.env.HOME ?? "", ".cache", "ms-playwright")
-  ]);
-
-  if (browserPath) {
-    process.env.PLAYWRIGHT_BROWSERS_PATH = browserPath;
-  }
+  process.env.PLAYWRIGHT_BROWSERS_PATH = path.resolve(__dirname, "..", ".playwright-browsers");
 
   configured = true;
+}
+
+export async function ensurePlaywrightInstalled(): Promise<void> {
+  ensurePlaywrightBrowsersPath();
+
+  const browsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH!;
+  fs.mkdirSync(browsersPath, { recursive: true });
+
+  if (fs.readdirSync(browsersPath, { withFileTypes: true }).some((entry) => entry.isDirectory())) {
+    return;
+  }
+
+  if (!installPromise) {
+    installPromise = execFileAsync("npx", ["playwright", "install", "chromium"], {
+      cwd: path.resolve(__dirname, ".."),
+      env: {
+        ...process.env,
+        PLAYWRIGHT_BROWSERS_PATH: browsersPath
+      }
+    }).then(() => undefined).finally(() => {
+      installPromise = null;
+    });
+  }
+
+  await installPromise;
 }

@@ -77,7 +77,8 @@ export async function ensurePlaywrightInstalled(): Promise<void> {
   }
 
   if (!installPromise) {
-    const playwrightCli = require.resolve("playwright/cli");
+    const playwrightPackageJson = require.resolve("playwright/package.json");
+    const playwrightCli = path.join(path.dirname(playwrightPackageJson), "cli.js");
     installPromise = execFileAsync(process.execPath, [playwrightCli, "install", "chromium"], {
       cwd: path.resolve(__dirname, ".."),
       env: {

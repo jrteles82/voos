@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "sh -c 'PW_PATH=\"${PLAYWRIGHT_BROWSERS_PATH:-$PWD/.playwright-browsers}\" && mkdir -p \"$PW_PATH\" && PLAYWRIGHT_BROWSERS_PATH=\"$PW_PATH\" npx playwright install chromium && exec node dist/server.js'",
+    "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-.playwright-browsers} npx playwright install chromium",
     "deploy:hostinger": "./scripts/deploy-hostinger.sh"

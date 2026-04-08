@@ -1,0 +1,28 @@
+.vercel
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node / Playwright
+node_modules/
+.playwright-browsers/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Runtime / local data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Debug and generated artifacts
+debug_*.png
+debug_*.html
+*_resultado.json

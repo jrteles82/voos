@@ -443,7 +443,7 @@ class GoogleFlightsScraper:
         if extra_wait > 0:
             time.sleep(extra_wait)
 
-    def _extract_summary_price(self, page) -> float | None:
+    def _extract_summary_price(self, page) -> Optional[float]:
         patterns = [
             r"Menores preços\s+a partir de\s+R\$\s*([\d\.]+(?:,\d{2})?)",
             r"Menores preços.*?R\$\s*([\d\.]+(?:,\d{2})?)",
@@ -495,7 +495,7 @@ class GoogleFlightsScraper:
             return False
         return any(x in low for x in ["parada", "escalas", "co2", "emissões", "voo", "aeroporto"])
 
-    def _extract_visible_flight_cards(self, page) -> list[dict]:
+    def _extract_visible_flight_cards(self, page) -> List[dict]:
         cards = []
         selectors = [
             "[role='main'] [role='listitem']",
@@ -553,7 +553,7 @@ class GoogleFlightsScraper:
                 pass
         return sorted(cards, key=lambda item: item.get("price") if item.get("price") is not None else 10**12)
 
-    def _sort_candidate_cards(self, cards: list[dict], summary_price: float | None) -> list[dict]:
+    def _sort_candidate_cards(self, cards: List[dict], summary_price: Optional[float]) -> List[dict]:
         def _score(item: dict):
             price = item.get("price")
             if price is None:
@@ -630,7 +630,7 @@ class GoogleFlightsScraper:
 
         return self._wait_for_booking_page(page)
 
-    def _collect_booking_text_blocks(self, page) -> list[str]:
+    def _collect_booking_text_blocks(self, page) -> List[str]:
         blocks = []
         selectors = [
             "[role='main'] [role='listitem']",
@@ -661,7 +661,7 @@ class GoogleFlightsScraper:
                 pass
         return blocks
 
-    def _extract_vendor_options_from_text(self, text: str) -> list[dict]:
+    def _extract_vendor_options_from_text(self, text: str) -> List[dict]:
         options = []
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         known_vendors = [
@@ -714,7 +714,7 @@ class GoogleFlightsScraper:
                 dedup.append(item)
         return dedup
 
-    def _extract_booking_total_price(self, page) -> float | None:
+    def _extract_booking_total_price(self, page) -> Optional[float]:
         patterns = [
             r"Menor preço total\s*R\$\s*([\d\.]+(?:,\d{2})?)",
             r"Menor preço total.*?R\$\s*([\d\.]+(?:,\d{2})?)",
@@ -737,7 +737,7 @@ class GoogleFlightsScraper:
                     pass
         return None
 
-    def _extract_booking_options(self, page) -> tuple[str, float | None, list[dict]]:
+    def _extract_booking_options(self, page) -> Tuple[str, Optional[float], List[dict]]:
         blocks = self._collect_booking_text_blocks(page)
         options = []
         for block in blocks:

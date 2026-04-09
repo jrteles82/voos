@@ -1,3 +1,4 @@
+from typing import List, Dict, Tuple, Optional
 import json, re, time
 
 # This script replaces the GoogleFlightsScraper class in skyscanner.py with an advanced version.
@@ -22,7 +23,7 @@ new_scraper = '''class GoogleFlightsScraper:
             except Exception:
                 pass
 
-    def _extract_summary_price(self, page) -> float | None:
+    def _extract_summary_price(self, page) -> Optional[float]:
         patterns = [
             r"Menores preços\s+a partir de\s+R\$\s*([\d\.]+(?:,\d{2})?)",
             r"Menores preços.*?R\$\s*([\d\.]+(?:,\d{2})?)",
@@ -64,7 +65,7 @@ new_scraper = '''class GoogleFlightsScraper:
                 pass
         return False
 
-    def _extract_visible_flight_cards(self, page) -> list[dict]:
+    def _extract_visible_flight_cards(self, page) -> List[dict]:
         cards = []
         selectors = ["[role='listitem']", "li", "div[jscontroller]", "div[role='button']"]
         
@@ -99,7 +100,7 @@ new_scraper = '''class GoogleFlightsScraper:
             if cards: break
         return cards
 
-    def _open_card_and_extract_vendor(self, page, card) -> tuple[str, float | None, list[dict]]:
+    def _open_card_and_extract_vendor(self, page, card) -> Tuple[str, Optional[float], List[dict]]:
         try:
             card.click(timeout=4000)
             time.sleep(2.5)

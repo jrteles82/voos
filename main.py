@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import List, Dict, Tuple, Optional
 
 from flask import Flask, Response, jsonify, request, stream_with_context, session, redirect, url_for, render_template_string, g
 from pathlib import Path
@@ -103,7 +104,7 @@ def build_restart_redirect(message: str, level: str = "info"):
     return redirect(url_for("painel", _anchor="cron", restart_status=level, restart_message=message))
 
 
-def trigger_service_restart() -> tuple[bool, str, bool]:
+def trigger_service_restart() -> Tuple[bool, str, bool]:
     command = PANEL_RESTART_COMMAND
     if command:
         try:
@@ -132,7 +133,7 @@ def trigger_service_restart() -> tuple[bool, str, bool]:
         return False, f"Falha ao iniciar novo processo: {exc}", False
 
 
-def date_color_token(date_iso: str | None) -> tuple[str, str]:
+def date_color_token(date_iso: Optional[str]) -> Tuple[str, str]:
     txt = (date_iso or "").strip()
     palette = [
         ("🔵", "azul"),
@@ -149,12 +150,12 @@ def date_color_token(date_iso: str | None) -> tuple[str, str]:
     return palette[sum(digits) % len(palette)]
 
 
-def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
+def build_full_scan_message(parsed: List[dict], trigger: str = "manual") -> str:
     def _price_num(row):
         v = row.get("price")
         return v if isinstance(v, (int, float)) and v is not None else 10**12
 
-    def _dedupe_sorted_rows(rows: list[dict]) -> list[dict]:
+    def _dedupe_sorted_rows(rows: List[dict]) -> List[dict]:
         seen = set()
         result = []
         for row in rows:
@@ -179,11 +180,11 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         "novo": "🔵",
     }
 
-    def _format_direction(rows: list[dict], best_row: dict | None, section_title: str, highlight_axis: str) -> list[str]:
+    def _format_direction(rows: List[dict], best_row: dict | None, section_title: str, highlight_axis: str) -> List[str]:
         if not rows:
             return [section_title, "N/D"]
 
-        grouped: dict[str, list[dict]] = {}
+        grouped: Dict[str, List[dict]] = {}
         for row in rows:
             date = row.get("outbound_date", "") or ""
             grouped.setdefault(date, []).append(row)
@@ -235,7 +236,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     return "\n".join(lines)
 
 
-def notify_full_scan(parsed: list[dict], trigger: str = "manual", send_fn=None, max_price: float | None = None) -> None:
+def notify_full_scan(parsed: List[dict], trigger: str = "manual", send_fn=None, max_price: Optional[float] = None) -> None:
     filtered = filter_rows_by_max_price(parsed, max_price)
     msg = build_full_scan_message(filtered, trigger=trigger)
     sender = send_fn or send_telegram_message
@@ -250,7 +251,7 @@ def notify_full_scan(parsed: list[dict], trigger: str = "manual", send_fn=None, 
         pass
 
 
-def _build_user_routes(conn, user_id: int) -> list[RouteQuery]:
+def _build_user_routes(conn, user_id: int) -> List[RouteQuery]:
     rows = conn.execute(
         """
         SELECT origin, destination, outbound_date, inbound_date
@@ -381,14 +382,14 @@ def _store_result(db: Database, route: RouteQuery, result: FlightResult) -> dict
     return _result_to_row(result, band)
 
 
-def _split_routes(routes: list[RouteQuery], chunks: int) -> list[list[RouteQuery]]:
+def _split_routes(routes: List[RouteQuery], chunks: int) -> List[list[RouteQuery]]:
     if not routes or chunks <= 0:
         return []
     chunk_size = ceil(len(routes) / chunks)
     return [routes[i * chunk_size:(i + 1) * chunk_size] for i in range(chunks)]
 
 
-def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
+def run_scan_for_routes(routes: List[RouteQuery], on_row=None):
     if not routes:
         return []
 
@@ -404,12 +405,12 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
         override_workers = requested_workers
     worker_count = max(1, min(len(routes), override_workers))
     route_chunks = _split_routes(routes, worker_count)
-    chunk_results: list[list[tuple[RouteQuery, FlightResult]] | None] = [None] * len(route_chunks)
+    chunk_results: Optional[List[list[Tuple[RouteQuery, FlightResult]]]] = [None] * len(route_chunks)
 
-    def _scan_chunk(chunk_idx: int, chunk_routes: list[RouteQuery]) -> list[tuple[RouteQuery, FlightResult]]:
+    def _scan_chunk(chunk_idx: int, chunk_routes: List[RouteQuery]) -> List[Tuple[RouteQuery, FlightResult]]:
         if not chunk_routes:
             return []
-        worker_results: list[tuple[RouteQuery, FlightResult]] = []
+        worker_results: List[Tuple[RouteQuery, FlightResult]] = []
         user_data_dir = os.getenv("SKYSCANNER_USER_DATA_DIR", "/tmp/skyscanner-profile")
         chunk_user_dir = f"{user_data_dir}-worker-{chunk_idx}"
         with sync_playwright() as p:
@@ -442,7 +443,7 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
                 chunk_results[chunk_idx] = future.result()
 
     db = Database(get_db_path())
-    parsed: list[dict] = []
+    parsed: List[dict] = []
     idx = 0
     try:
         for chunk in chunk_results:
@@ -655,7 +656,7 @@ def get_db_path() -> str:
     return configured
 
 
-def send_telegram_message_to(text: str, token: str | None = None, chat_id: str | None = None) -> None:
+def send_telegram_message_to(text: str, token: Optional[str] = None, chat_id: Optional[str] = None) -> None:
     token = token or os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id:
@@ -678,7 +679,7 @@ def _load_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-def _group_scan_rows_for_image(rows: list[dict]) -> list[tuple[str, list[dict]]]:
+def _group_scan_rows_for_image(rows: List[dict]) -> List[Tuple[str, list[dict]]]:
     idas = [
         r for r in rows
         if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"
@@ -706,7 +707,7 @@ def _best_vendor_label(row: dict) -> str:
     return vendor
 
 
-def build_scan_results_image(rows: list[dict]) -> str | None:
+def build_scan_results_image(rows: List[dict]) -> Optional[str]:
     groups = _group_scan_rows_for_image(rows)
     if not groups:
         return None
@@ -824,7 +825,7 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
     return tmp.name
 
 
-def send_telegram_photo_to(image_path: str, caption: str | None = None, token: str | None = None, chat_id: str | None = None) -> None:
+def send_telegram_photo_to(image_path: str, caption: Optional[str] = None, token: Optional[str] = None, chat_id: Optional[str] = None) -> None:
     token = token or os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id or not image_path or not os.path.exists(image_path):
@@ -839,7 +840,7 @@ def send_telegram_photo_to(image_path: str, caption: str | None = None, token: s
         ).raise_for_status()
 
 
-def send_telegram_message(text: str, image_rows: list[dict] | None = None) -> None:
+def send_telegram_message(text: str, image_rows: Optional[List[dict]] = None) -> None:
     send_telegram_message_to(text)
     image_path = build_scan_results_image(image_rows or [])
     if not image_path:
@@ -853,7 +854,7 @@ def send_telegram_message(text: str, image_rows: list[dict] | None = None) -> No
             pass
 
 
-def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] | None = None) -> None:
+def send_user_telegram_message(user_id: int, text: str, image_rows: Optional[List[dict]] = None) -> None:
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     try:
@@ -882,7 +883,7 @@ def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] |
         conn.close()
 
 
-def extract_final_price_source(notes: str | None) -> str:
+def extract_final_price_source(notes: Optional[str]) -> str:
     txt = (notes or "")
     m = re.search(r"final_price_source=([^|]+)", txt)
     if not m:
@@ -890,7 +891,7 @@ def extract_final_price_source(notes: str | None) -> str:
     return (m.group(1) or "").strip()
 
 
-def _extract_maxmilhas_prices_from_notes(notes: str | None) -> list[float]:
+def _extract_maxmilhas_prices_from_notes(notes: Optional[str]) -> List[float]:
     txt = notes or ""
     match = re.search(r"precos=\[([^\]]+)\]", txt)
     if not match:
@@ -941,7 +942,7 @@ def normalize_maxmilhas_history() -> int:
     return updated
 
 
-def get_user_max_display_price(user_id: int | None) -> float | None:
+def get_user_max_display_price(user_id: Optional[int]) -> Optional[float]:
     if not user_id:
         return None
     conn = sqlite3.connect(auth_db_path())
@@ -961,7 +962,7 @@ def get_user_max_display_price(user_id: int | None) -> float | None:
         conn.close()
 
 
-def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[dict]:
+def filter_rows_by_max_price(rows: List[dict], max_price: Optional[float]) -> List[dict]:
     if max_price is None:
         return rows
     return [
@@ -970,7 +971,7 @@ def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[
     ]
 
 
-def get_global_max_price_limit() -> float | None:
+def get_global_max_price_limit() -> Optional[float]:
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     try:
@@ -1002,7 +1003,7 @@ def _to_route(query_args) -> RouteQuery:
     )
 
 
-def _resolve_requested_sources(query_args, route: RouteQuery) -> list[str]:
+def _resolve_requested_sources(query_args, route: RouteQuery) -> List[str]:
     fonte = (query_args.get("fonte") or "").strip().lower()
     if fonte in {"maxmilhas"}:
         return [] if (route.inbound_date or "").strip() else ["maxmilhas"]

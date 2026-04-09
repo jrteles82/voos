@@ -1,3 +1,4 @@
+from typing import List, Dict, Tuple, Optional
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from datetime import datetime
 import json
@@ -106,7 +107,7 @@ def normalizar_preco(texto: str):
         return None
 
 
-def filtrar_precos_parcelados(precos: list[float]) -> list[float]:
+def filtrar_precos_parcelados(precos: List[float]) -> List[float]:
     if not precos:
         return []
 

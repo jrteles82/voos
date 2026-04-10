@@ -14,6 +14,7 @@ const templates_1 = require("./templates");
 const utils_1 = require("./utils");
 const auth_1 = require("./auth");
 const node_child_process_1 = require("node:child_process");
+const scanWorker_1 = require("./scanWorker");
 const app = (0, express_1.default)();
 const staticDir = node_path_1.default.resolve(process.cwd(), "static");
 app.use(express_1.default.urlencoded({ extended: true }));
@@ -75,7 +76,8 @@ app.get("/internal/cron", async (req, res) => {
         res.status(403).json({ ok: false, error: "forbidden" });
         return;
     }
-    res.status(501).json({ ok: false, error: "Worker externo necessario. Execute src/worker.ts fora do Hostinger web." });
+    const results = await (0, scanWorker_1.processDueUserScans)();
+    res.json({ ok: true, processed: results.length, results });
 });
 app.get("/rotas", async (req, res) => {
     const routes = await getRequestRoutes(req);

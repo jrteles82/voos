@@ -63,10 +63,16 @@ DEFAULT_SCHEDULE_MINUTES = max(1, int(CONFIG.get("schedule_minutes", DEFAULT_SCA
 SCAN_INTERVAL_SECONDS = int(os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", str(DEFAULT_SCAN_INTERVAL)))
 AUTO_SCAN_ENABLED = os.getenv("SKYSCANNER_AUTO_SCAN", "1") == "1"
 USER_SCAN_POLL_SECONDS = int(os.getenv("SKYSCANNER_USER_SCAN_POLL_SECONDS", "60"))
+USER_RUN_STALE_SECONDS = int(os.getenv("SKYSCANNER_USER_RUN_STALE_SECONDS", "7200"))
 PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
+SERVERLESS_ENV = any(os.getenv(name) for name in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME"))
+INTERNAL_SCHEDULER_ENABLED = os.getenv("SKYSCANNER_INTERNAL_SCHEDULER", "0" if SERVERLESS_ENV else "1") == "1"
 _scan_lock = threading.Lock()
+_user_run_state_lock = threading.Lock()
 _scan_last_run_at = None
+_auto_scan_started = False
 _user_scheduler_started = False
+_runtime_bootstrap_done = False
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
@@ -121,6 +127,15 @@ def trigger_service_restart() -> Tuple[bool, str, bool]:
             return True, "Comando de reinício executado.", False
         except Exception as exc:
             return False, f"Falha ao executar reinício: {exc}", False
+
+    argv_text = " ".join(sys.argv).lower()
+    server_software = os.getenv("SERVER_SOFTWARE", "").lower()
+    if "gunicorn" in argv_text or "gunicorn" in server_software:
+        return (
+            False,
+            "Reinício pelo painel exige SKYSCANNER_RESTART_COMMAND quando a aplicação está sob gunicorn/systemd.",
+            False,
+        )
 
     if os.getenv("WERKZEUG_RUN_MAIN") == "true":
         return False, "Reinício pelo próprio processo não é suportado com o reloader do Flask.", False
@@ -495,7 +510,7 @@ def _touch_user_cron_run(conn, user_id: int) -> None:
 def _user_has_running_scan(conn, user_id: int) -> bool:
     row = conn.execute(
         """
-        SELECT 1
+        SELECT id, started_at
         FROM user_runs
         WHERE user_id = ? AND status = 'running'
         ORDER BY id DESC
@@ -503,16 +518,33 @@ def _user_has_running_scan(conn, user_id: int) -> bool:
         """,
         (user_id,),
     ).fetchone()
-    return bool(row)
+    if not row:
+        return False
+
+    started_at = row["started_at"]
+    if started_at:
+        try:
+            started = datetime.fromisoformat(started_at)
+            age_seconds = (datetime.now() - started).total_seconds()
+            if age_seconds >= max(300, USER_RUN_STALE_SECONDS):
+                _finish_user_run(conn, int(row["id"]), "error", "Execucao anterior marcada como orfa por exceder o tempo limite")
+                return False
+        except Exception:
+            pass
+
+    return True
 
 
 def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True):
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
-    run_id = _create_user_run(conn, user_id, trigger=trigger)
     try:
-        if trigger.startswith("agendada"):
-            _touch_user_cron_run(conn, user_id)
+        with _user_run_state_lock:
+            if _user_has_running_scan(conn, user_id):
+                raise RuntimeError("Ja existe uma varredura em andamento para este usuario.")
+            run_id = _create_user_run(conn, user_id, trigger=trigger)
+            if trigger.startswith("agendada"):
+                _touch_user_cron_run(conn, user_id)
         routes = _build_user_routes(conn, user_id)
         if not routes:
             routes = build_db_queries(get_db_path())
@@ -548,7 +580,20 @@ def _auto_scan_loop():
 
 
 def start_auto_scan_if_needed():
+    global _auto_scan_started
+
     start_user_scan_scheduler_if_needed()
+
+    if _auto_scan_started:
+        return
+
+    if SERVERLESS_ENV:
+        print("[auto-scan] indisponível em runtime serverless")
+        return
+
+    if not INTERNAL_SCHEDULER_ENABLED:
+        print("[auto-scan] desativado por SKYSCANNER_INTERNAL_SCHEDULER=0")
+        return
 
     if not AUTO_SCAN_ENABLED:
         print("[auto-scan] desativado por SKYSCANNER_AUTO_SCAN=0")
@@ -561,6 +606,7 @@ def start_auto_scan_if_needed():
 
     t = threading.Thread(target=_auto_scan_loop, daemon=True)
     t.start()
+    _auto_scan_started = True
     print(f"[auto-scan] ligado: intervalo {SCAN_INTERVAL_SECONDS}s + cron por usuário")
 
 
@@ -593,48 +639,65 @@ def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
     return (datetime.now() - last_started).total_seconds() >= interval_seconds
 
 
+def process_due_user_scans_once() -> List[dict]:
+    conn = sqlite3.connect(auth_db_path())
+    conn.row_factory = sqlite3.Row
+    results: List[dict] = []
+    try:
+        users = conn.execute(
+            """
+            SELECT u.id AS user_id,
+                   COALESCE(c.enabled, 1) AS enabled,
+                   c.schedule_minutes,
+                   c.every_hours
+            FROM users u
+            LEFT JOIN user_cron c ON c.user_id = u.id
+            """
+        ).fetchall()
+        for u in users:
+            if int(u["enabled"] or 0) != 1:
+                continue
+            schedule_minutes = u["schedule_minutes"]
+            if schedule_minutes is None:
+                fallback_hours = u["every_hours"]
+                if fallback_hours and fallback_hours > 0:
+                    schedule_minutes = int(fallback_hours) * 60
+                else:
+                    schedule_minutes = DEFAULT_SCHEDULE_MINUTES
+            schedule_minutes = max(1, int(schedule_minutes))
+            if not _should_run_user_now(conn, int(u["user_id"]), schedule_minutes):
+                continue
+            try:
+                result = run_user_scan(int(u["user_id"]), trigger="agendada-usuario")
+                summary = str(result.get("summary", "ok"))
+                print(f"[user-scan] execução usuário={u['user_id']} concluída")
+                results.append({"user_id": int(u["user_id"]), "status": "ok", "summary": summary})
+            except Exception as e:
+                message = str(e)[:200]
+                print(f"[user-scan] erro usuário={u['user_id']}: {message}")
+                results.append({"user_id": int(u["user_id"]), "status": "error", "summary": message})
+    finally:
+        conn.close()
+    return results
+
+
 def _user_scan_scheduler_loop():
     while True:
-        conn = sqlite3.connect(auth_db_path())
-        conn.row_factory = sqlite3.Row
-        try:
-            users = conn.execute(
-                """
-                SELECT u.id AS user_id,
-                       COALESCE(c.enabled, 1) AS enabled,
-                       c.schedule_minutes,
-                       c.every_hours
-                FROM users u
-                LEFT JOIN user_cron c ON c.user_id = u.id
-                """
-            ).fetchall()
-            for u in users:
-                if int(u["enabled"] or 0) != 1:
-                    continue
-                schedule_minutes = u["schedule_minutes"]
-                if schedule_minutes is None:
-                    fallback_hours = u["every_hours"]
-                    if fallback_hours and fallback_hours > 0:
-                        schedule_minutes = int(fallback_hours) * 60
-                    else:
-                        schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-                schedule_minutes = max(1, int(schedule_minutes))
-                if not _should_run_user_now(conn, int(u["user_id"]), schedule_minutes):
-                    continue
-                try:
-                    run_user_scan(int(u["user_id"]), trigger="agendada-usuario")
-                    print(f"[user-scan] execução usuário={u['user_id']} concluída")
-                except Exception as e:
-                    print(f"[user-scan] erro usuário={u['user_id']}: {e}")
-        finally:
-            conn.close()
-
+        process_due_user_scans_once()
         time.sleep(max(30, USER_SCAN_POLL_SECONDS))
 
 
 def start_user_scan_scheduler_if_needed():
     global _user_scheduler_started
     if _user_scheduler_started:
+        return
+
+    if SERVERLESS_ENV:
+        print("[user-scan] indisponível em runtime serverless")
+        return
+
+    if not INTERNAL_SCHEDULER_ENABLED:
+        print("[user-scan] desativado por SKYSCANNER_INTERNAL_SCHEDULER=0")
         return
 
     is_reloader_main = os.getenv("WERKZEUG_RUN_MAIN") == "true"
@@ -1212,6 +1275,16 @@ def cron():
     parsed_filtered = filter_rows_by_max_price(parsed, max_price)
     notify_full_scan(parsed, trigger="manual", max_price=max_price)
     return jsonify({"status": "ok", "resultados": parsed_filtered, "last_run_at": _scan_last_run_at})
+
+
+@app.route("/internal/cron", methods=["GET"])
+def internal_cron():
+    secret = os.getenv("CRON_SECRET", "").strip()
+    provided = request.args.get("token", "").strip()
+    if not secret or provided != secret:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    results = process_due_user_scans_once()
+    return jsonify({"ok": True, "processed": len(results), "results": results})
 
 
 @app.route("/cron-stream", methods=["GET"])
@@ -2140,7 +2213,10 @@ def save_telegram():
 @login_required
 def run_now_user():
     user = current_user()
-    run_user_scan(int(user["id"]), trigger="painel-manual", notify=True)
+    try:
+        run_user_scan(int(user["id"]), trigger="painel-manual", notify=True)
+    except RuntimeError as exc:
+        return build_restart_redirect(str(exc), level="error")
     return redirect(url_for("painel", _anchor="cron"))
 
 
@@ -2189,9 +2265,19 @@ def save_cron():
     return redirect(url_for("painel", _anchor="cron"))
 
 
-if __name__ == "__main__":
+def bootstrap_app_runtime() -> None:
+    global _runtime_bootstrap_done
+    if _runtime_bootstrap_done:
+        return
     init_auth_tables()
     normalize_maxmilhas_history()
     start_auto_scan_if_needed()
+    _runtime_bootstrap_done = True
+
+
+bootstrap_app_runtime()
+
+
+if __name__ == "__main__":
     debug_mode = os.getenv("FLASK_DEBUG", "0").strip().lower() in ("1", "true", "yes")
     app.run(debug=debug_mode)

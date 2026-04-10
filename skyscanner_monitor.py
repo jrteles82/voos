@@ -20,10 +20,12 @@ Instalação:
     PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers .venv/bin/playwright install chromium
 
 Uso:
-    export TELEGRAM_BOT_TOKEN='...'
-    export TELEGRAM_CHAT_ID='...'
     .venv/bin/python skyscanner.py run-once
     .venv/bin/python skyscanner.py daemon
+
+Telegram:
+- opcional, configurado apenas em `skyscanner-config.json`
+- sem `telegram_bot_token` e `telegram_chat_id`, o script não envia alerta
 
 Observações:
 - Como o site pode mudar, os seletores podem precisar de ajustes.
@@ -80,8 +82,8 @@ DEFAULT_CONFIG = {
     "settle_seconds": 2,
     "request_pause_seconds": 0.2,
     "db_path": str(Path(__file__).with_name("flight_tracker_browser.db")),
-    "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "8651349481:AAHRdUKl7Dx-GJ76Yy_kQiJ4jA6TCaQ8r4g"),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "1748352987"),
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
     "price_alert_brl": 1800.0,
     "drop_alert_percent": 8.0,
     "target_site": "google_flights",

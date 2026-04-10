@@ -14,13 +14,34 @@ import time
 import random
 import requests
 import threading
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import ceil
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image, ImageDraw, ImageFont
+from db import DatabaseIntegrityError, DatabaseOperationalError, connect_db, ensure_column, mysql_enabled
+
+
+def _load_local_env_file() -> None:
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+_load_local_env_file()
 
 from skyscanner import (
     CONFIG,
@@ -73,6 +94,9 @@ _scan_last_run_at = None
 _auto_scan_started = False
 _user_scheduler_started = False
 _runtime_bootstrap_done = False
+MANUAL_QUERY_CACHE_TTL_SECONDS = int(os.getenv("MANUAL_QUERY_CACHE_TTL_SECONDS", "300"))
+_manual_query_cache_lock = threading.Lock()
+_manual_query_cache: dict[tuple[str, str, str, str, str], dict] = {}
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
@@ -390,10 +414,11 @@ def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | No
     )
 
 
-def _store_result(db: Database, route: RouteQuery, result: FlightResult) -> dict:
+def _store_result(db: Database, route: RouteQuery, result: FlightResult, user_id: Optional[int] = None, persist: bool = True) -> dict:
     min_price, avg_price, _last_price = db.stats_for(route)
     band = classify_price(result.price, min_price, avg_price)
-    db.save(result, band)
+    if persist:
+        db.save(result, band, user_id=user_id)
     return _result_to_row(result, band)
 
 
@@ -404,7 +429,65 @@ def _split_routes(routes: List[RouteQuery], chunks: int) -> List[list[RouteQuery
     return [routes[i * chunk_size:(i + 1) * chunk_size] for i in range(chunks)]
 
 
-def run_scan_for_routes(routes: List[RouteQuery], on_row=None):
+def _route_key(route: RouteQuery) -> tuple[str, str, str, str, str]:
+    return (
+        (route.origin or "").upper(),
+        (route.destination or "").upper(),
+        route.outbound_date or "",
+        route.inbound_date or "",
+        route.trip_type or "oneway",
+    )
+
+
+def _dedupe_routes(routes: List[RouteQuery]) -> List[RouteQuery]:
+    unique: List[RouteQuery] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for route in routes:
+        key = _route_key(route)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(route)
+    return unique
+
+
+def _manual_cache_key(route: RouteQuery, source: str) -> tuple[str, str, str, str, str]:
+    return (
+        (route.origin or "").upper(),
+        (route.destination or "").upper(),
+        route.outbound_date or "",
+        route.inbound_date or "",
+        source,
+    )
+
+
+def _get_manual_cached_result(route: RouteQuery, source: str) -> Optional[dict]:
+    if MANUAL_QUERY_CACHE_TTL_SECONDS <= 0:
+        return None
+    key = _manual_cache_key(route, source)
+    now = time.time()
+    with _manual_query_cache_lock:
+        entry = _manual_query_cache.get(key)
+        if not entry:
+            return None
+        if now - float(entry["created_at"]) > MANUAL_QUERY_CACHE_TTL_SECONDS:
+            _manual_query_cache.pop(key, None)
+            return None
+        return dict(entry["row"])
+
+
+def _set_manual_cached_result(route: RouteQuery, source: str, row: dict) -> None:
+    if MANUAL_QUERY_CACHE_TTL_SECONDS <= 0:
+        return
+    key = _manual_cache_key(route, source)
+    with _manual_query_cache_lock:
+        _manual_query_cache[key] = {
+            "created_at": time.time(),
+            "row": dict(row),
+        }
+
+
+def run_scan_for_routes(routes: List[RouteQuery], on_row=None, user_id: Optional[int] = None, persist: bool = True):
     if not routes:
         return []
 
@@ -465,7 +548,7 @@ def run_scan_for_routes(routes: List[RouteQuery], on_row=None):
             if not chunk:
                 continue
             for route, result in chunk:
-                row = _store_result(db, route, result)
+                row = _store_result(db, route, result, user_id=user_id, persist=persist)
                 parsed.append(row)
                 idx += 1
                 if on_row:
@@ -484,7 +567,7 @@ def run_full_scan(on_row=None):
 
 def _create_user_run(conn, user_id: int, trigger: str = "manual-user") -> int:
     cur = conn.execute(
-        "INSERT INTO user_runs (user_id, started_at, status, summary, trigger) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO user_runs (user_id, started_at, status, summary, `trigger`) VALUES (?, ?, ?, ?, ?)",
         (user_id, datetime.now().isoformat(), "running", "", trigger),
     )
     conn.commit()
@@ -535,9 +618,31 @@ def _user_has_running_scan(conn, user_id: int) -> bool:
     return True
 
 
+def _build_scheduled_user_scan_payloads(conn, schedule_minutes: int) -> List[dict]:
+    payloads: List[dict] = []
+    users = conn.execute(
+        """
+        SELECT u.id AS user_id,
+               COALESCE(c.enabled, 1) AS enabled
+        FROM users u
+        LEFT JOIN user_cron c ON c.user_id = u.id
+        """
+    ).fetchall()
+    for row in users:
+        user_id = int(row["user_id"])
+        if int(row["enabled"] or 0) != 1:
+            continue
+        if not _should_run_user_now(conn, user_id, schedule_minutes):
+            continue
+        routes = _build_user_routes(conn, user_id)
+        if not routes:
+            continue
+        payloads.append({"user_id": user_id, "routes": _dedupe_routes(routes)})
+    return payloads
+
+
 def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True):
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(auth_db_path())
     try:
         with _user_run_state_lock:
             if _user_has_running_scan(conn, user_id):
@@ -547,8 +652,14 @@ def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = Tru
                 _touch_user_cron_run(conn, user_id)
         routes = _build_user_routes(conn, user_id)
         if not routes:
-            routes = build_db_queries(get_db_path())
-        parsed = run_scan_for_routes(routes)
+            _finish_user_run(conn, run_id, "ok", "Nenhuma rota configurada para este usuario.")
+            return {"status": "ok", "summary": "Nenhuma rota configurada para este usuario.", "parsed": []}
+        db = Database(get_db_path())
+        try:
+            db.clear_results_for_user(user_id)
+        finally:
+            db.conn.close()
+        parsed = run_scan_for_routes(routes, user_id=user_id, persist=True)
         max_price = get_user_max_display_price(user_id)
         parsed_for_display = filter_rows_by_max_price(parsed, max_price)
         msg = build_full_scan_message(parsed_for_display, trigger=trigger)
@@ -607,7 +718,7 @@ def start_auto_scan_if_needed():
     t = threading.Thread(target=_auto_scan_loop, daemon=True)
     t.start()
     _auto_scan_started = True
-    print(f"[auto-scan] ligado: intervalo {SCAN_INTERVAL_SECONDS}s + cron por usuário")
+    print(f"[auto-scan] ligado: intervalo {SCAN_INTERVAL_SECONDS}s + cron global")
 
 
 def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
@@ -627,7 +738,7 @@ def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
             pass
 
     fallback = conn.execute(
-        "SELECT started_at FROM user_runs WHERE user_id = ? AND trigger LIKE 'agendada%' ORDER BY id DESC LIMIT 1",
+        "SELECT started_at FROM user_runs WHERE user_id = ? AND `trigger` LIKE 'agendada%' ORDER BY id DESC LIMIT 1",
         (user_id,),
     ).fetchone()
     if not fallback or not fallback["started_at"]:
@@ -640,42 +751,110 @@ def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
 
 
 def process_due_user_scans_once() -> List[dict]:
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(auth_db_path())
     results: List[dict] = []
     try:
-        users = conn.execute(
-            """
-            SELECT u.id AS user_id,
-                   COALESCE(c.enabled, 1) AS enabled,
-                   c.schedule_minutes,
-                   c.every_hours
-            FROM users u
-            LEFT JOIN user_cron c ON c.user_id = u.id
-            """
-        ).fetchall()
-        for u in users:
-            if int(u["enabled"] or 0) != 1:
-                continue
-            schedule_minutes = u["schedule_minutes"]
-            if schedule_minutes is None:
-                fallback_hours = u["every_hours"]
-                if fallback_hours and fallback_hours > 0:
-                    schedule_minutes = int(fallback_hours) * 60
-                else:
-                    schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-            schedule_minutes = max(1, int(schedule_minutes))
-            if not _should_run_user_now(conn, int(u["user_id"]), schedule_minutes):
-                continue
+        settings = get_global_cron_settings()
+        if int(settings["cron_enabled"]) != 1:
+            return results
+        schedule_minutes = max(1, int(settings["schedule_minutes"]))
+        due_payloads = _build_scheduled_user_scan_payloads(conn, schedule_minutes)
+        if not due_payloads:
+            return results
+
+        run_map: dict[int, int] = {}
+        route_map_by_user: dict[int, set[tuple[str, str, str, str, str]]] = {}
+        unique_routes: List[RouteQuery] = []
+        unique_seen: set[tuple[str, str, str, str, str]] = set()
+
+        with _user_run_state_lock:
+            for payload in due_payloads:
+                user_id = int(payload["user_id"])
+                if _user_has_running_scan(conn, user_id):
+                    results.append({"user_id": user_id, "status": "skipped", "summary": "Já existe uma varredura em andamento para este usuario."})
+                    continue
+                run_id = _create_user_run(conn, user_id, trigger="agendada-usuario")
+                _touch_user_cron_run(conn, user_id)
+                run_map[user_id] = run_id
+                keys_for_user: set[tuple[str, str, str, str, str]] = set()
+                for route in payload["routes"]:
+                    key = _route_key(route)
+                    keys_for_user.add(key)
+                    if key in unique_seen:
+                        continue
+                    unique_seen.add(key)
+                    unique_routes.append(route)
+                route_map_by_user[user_id] = keys_for_user
+
+        if not unique_routes:
+            return results
+
+        parsed = run_scan_for_routes(unique_routes, persist=False)
+        parsed_by_key: dict[tuple[str, str, str, str, str], List[dict]] = {}
+        for row in parsed:
+            trip_type = "roundtrip" if (row.get("inbound_date") or "").strip() else "oneway"
+            key = (
+                str(row.get("origin") or "").upper(),
+                str(row.get("destination") or "").upper(),
+                row.get("outbound_date") or "",
+                row.get("inbound_date") or "",
+                trip_type,
+            )
+            parsed_by_key.setdefault(key, []).append(row)
+
+        for user_id, run_id in run_map.items():
             try:
-                result = run_user_scan(int(u["user_id"]), trigger="agendada-usuario")
-                summary = str(result.get("summary", "ok"))
-                print(f"[user-scan] execução usuário={u['user_id']} concluída")
-                results.append({"user_id": int(u["user_id"]), "status": "ok", "summary": summary})
+                user_rows: List[dict] = []
+                user_db = Database(get_db_path())
+                try:
+                    user_db.clear_results_for_user(user_id)
+                    for key in route_map_by_user.get(user_id, set()):
+                        for row in parsed_by_key.get(key, []):
+                            result = FlightResult(
+                                site=str(row.get("site") or ""),
+                                origin=str(row.get("origin") or ""),
+                                destination=str(row.get("destination") or ""),
+                                outbound_date=str(row.get("outbound_date") or ""),
+                                inbound_date=str(row.get("inbound_date") or ""),
+                                trip_type="roundtrip" if (row.get("inbound_date") or "").strip() else "oneway",
+                                price=row.get("price"),
+                                currency=str(row.get("currency") or "BRL"),
+                                url=str(row.get("url") or ""),
+                                notes=str(row.get("notes") or ""),
+                                best_vendor=str(row.get("best_vendor") or ""),
+                                best_vendor_price=row.get("best_vendor_price"),
+                                booking_options_json=str(row.get("booking_options_json") or ""),
+                            )
+                            persisted_row = _store_result(
+                                user_db,
+                                RouteQuery(
+                                    origin=result.origin,
+                                    destination=result.destination,
+                                    outbound_date=result.outbound_date,
+                                    inbound_date=result.inbound_date,
+                                    trip_type=result.trip_type,
+                                ),
+                                result,
+                                user_id=user_id,
+                                persist=True,
+                            )
+                            user_rows.append(persisted_row)
+                finally:
+                    user_db.conn.close()
+                max_price = get_user_max_display_price(user_id)
+                parsed_for_display = filter_rows_by_max_price(user_rows, max_price)
+                msg = build_full_scan_message(parsed_for_display, trigger="agendada-usuario")
+                send_user_telegram_message(user_id, msg, image_rows=parsed_for_display)
+                total_ok = len([r for r in parsed_for_display if r.get("price") is not None])
+                summary = f"ok: {total_ok}/{len(parsed_for_display)} exibidos"
+                _finish_user_run(conn, run_id, "ok", summary)
+                print(f"[user-scan] execução usuário={user_id} concluída")
+                results.append({"user_id": user_id, "status": "ok", "summary": summary})
             except Exception as e:
                 message = str(e)[:200]
-                print(f"[user-scan] erro usuário={u['user_id']}: {message}")
-                results.append({"user_id": int(u["user_id"]), "status": "error", "summary": message})
+                _finish_user_run(conn, run_id, "error", message)
+                print(f"[user-scan] erro usuário={user_id}: {message}")
+                results.append({"user_id": user_id, "status": "error", "summary": message})
     finally:
         conn.close()
     return results
@@ -720,8 +899,8 @@ def get_db_path() -> str:
 
 
 def send_telegram_message_to(text: str, token: Optional[str] = None, chat_id: Optional[str] = None) -> None:
-    token = token or os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
-    chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
+    token = (token or "").strip()
+    chat_id = (chat_id or "").strip()
     if not token or not chat_id:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -889,8 +1068,8 @@ def build_scan_results_image(rows: List[dict]) -> Optional[str]:
 
 
 def send_telegram_photo_to(image_path: str, caption: Optional[str] = None, token: Optional[str] = None, chat_id: Optional[str] = None) -> None:
-    token = token or os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
-    chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
+    token = (token or "").strip()
+    chat_id = (chat_id or "").strip()
     if not token or not chat_id or not image_path or not os.path.exists(image_path):
         return
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
@@ -918,8 +1097,7 @@ def send_telegram_message(text: str, image_rows: Optional[List[dict]] = None) ->
 
 
 def send_user_telegram_message(user_id: int, text: str, image_rows: Optional[List[dict]] = None) -> None:
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(auth_db_path())
     try:
         row = conn.execute(
             "SELECT bot_token, chat_id FROM user_telegram WHERE user_id = ?",
@@ -1008,8 +1186,7 @@ def normalize_maxmilhas_history() -> int:
 def get_user_max_display_price(user_id: Optional[int]) -> Optional[float]:
     if not user_id:
         return None
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(auth_db_path())
     try:
         row = conn.execute(
             "SELECT max_price_display FROM user_cron WHERE user_id = ?",
@@ -1035,8 +1212,7 @@ def filter_rows_by_max_price(rows: List[dict], max_price: Optional[float]) -> Li
 
 
 def get_global_max_price_limit() -> Optional[float]:
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(auth_db_path())
     try:
         rows = conn.execute(
             "SELECT max_price_display FROM user_cron WHERE max_price_display IS NOT NULL"
@@ -1047,13 +1223,69 @@ def get_global_max_price_limit() -> Optional[float]:
         conn.close()
 
 
+def get_global_cron_settings() -> dict:
+    conn = connect_db(auth_db_path())
+    try:
+        ensure_app_settings_defaults(conn)
+        row = conn.execute(
+            "SELECT cron_enabled, schedule_minutes FROM app_settings WHERE id = 1"
+        ).fetchone()
+        return {
+            "cron_enabled": int(row["cron_enabled"] or 0) if row else 1,
+            "schedule_minutes": max(1, int(row["schedule_minutes"] or DEFAULT_SCHEDULE_MINUTES)) if row else DEFAULT_SCHEDULE_MINUTES,
+        }
+    finally:
+        conn.close()
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _format_time_hhmm(value: Optional[str]) -> str:
+    dt = _parse_iso_datetime(value)
+    return dt.strftime("%H:%M") if dt else "sem execucao"
+
+
+def _build_next_run_label(last_started_at: Optional[str], cron_enabled: int, schedule_minutes: int) -> str:
+    if int(cron_enabled) != 1:
+        return "cron desativado"
+    last_started = _parse_iso_datetime(last_started_at)
+    if not last_started:
+        return "aguardando primeira"
+    return (last_started + timedelta(minutes=max(1, schedule_minutes))).strftime("%H:%M")
+
+
+def _format_brl_input(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _parse_brl_input(value: str) -> Optional[float]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
+    return max(0.0, float(normalized))
+
+
 def _to_route(query_args) -> RouteQuery:
-    origin = query_args.get("origin", CONFIG.get("origin", "PVH")).upper()
-    destination = query_args.get("destination", "JPA").upper()
+    origin = query_args.get("origin", "").strip().upper()
+    destination = query_args.get("destination", "").strip().upper()
     outbound_date = query_args.get("outbound_date", "")
     inbound_date = query_args.get("inbound_date", "")
     trip_type = "roundtrip" if inbound_date else "oneway"
 
+    if not origin:
+        raise ValueError("Parâmetro obrigatório: origin")
+    if not destination:
+        raise ValueError("Parâmetro obrigatório: destination")
     if not outbound_date:
         raise ValueError("Parâmetro obrigatório: outbound_date (YYYY-MM-DD)")
 
@@ -1097,7 +1329,11 @@ def health():
 
 @app.route("/rotas", methods=["GET"])
 def rotas():
-    routes = build_db_queries(get_db_path())
+    user = current_user()
+    if not user:
+        return jsonify({"error": "forbidden"}), 403
+    conn = get_auth_db()
+    routes = _build_user_routes(conn, int(user["id"]))
     return jsonify(
         {
             "count": len(routes),
@@ -1127,34 +1363,73 @@ def consulta():
     user = current_user()
     max_price = get_user_max_display_price(int(user["id"])) if user else None
 
+    if not user:
+        return jsonify({"error": "forbidden"}), 403
+
     db = Database(get_db_path())
+    db.clear_results_for_user(int(user["id"]))
     requested_sources = _resolve_requested_sources(request.args, route)
     if not requested_sources:
         return jsonify({"error": "A MaxMilhas atualmente só está habilitada para consultas somente ida."}), 400
 
     results = []
-    with sync_playwright() as p:
-        browser = None
-        scraper = None
-        if "google_flights" in requested_sources:
-            browser = p.chromium.launch(headless=bool(CONFIG.get("headless", True)))
-            scraper = GoogleFlightsScraper(browser)
+    cached_sources = []
+    sources_to_fetch = []
+    for source in requested_sources:
+        cached = _get_manual_cached_result(route, source)
+        if cached is not None:
+            cached_result = FlightResult(
+                site=str(cached.get("site") or ""),
+                origin=str(cached.get("origin") or route.origin),
+                destination=str(cached.get("destination") or route.destination),
+                outbound_date=str(cached.get("outbound_date") or route.outbound_date),
+                inbound_date=str(cached.get("inbound_date") or route.inbound_date),
+                trip_type="roundtrip" if (cached.get("inbound_date") or "").strip() else "oneway",
+                price=cached.get("price"),
+                currency=str(cached.get("currency") or "BRL"),
+                url=str(cached.get("url") or ""),
+                notes=str(cached.get("notes") or ""),
+                best_vendor=str(cached.get("best_vendor") or ""),
+                best_vendor_price=cached.get("best_vendor_price"),
+                booking_options_json=str(cached.get("booking_options_json") or ""),
+            )
+            cached = _store_result(db, route, cached_result, user_id=int(user["id"]), persist=True)
+            cached["cache_hit"] = True
+            results.append(cached)
+            cached_sources.append(source)
+        else:
+            sources_to_fetch.append(source)
 
-        try:
-            for source in requested_sources:
-                if source == "google_flights":
-                    result = _search_google_result(scraper, route)
-                else:
-                    result = _search_maxmilhas_result(p, route)
+    if not sources_to_fetch:
+        requested_sources = []
+    else:
+        requested_sources = sources_to_fetch
 
-                if result is None:
-                    continue
+    if requested_sources:
+        with sync_playwright() as p:
+            browser = None
+            scraper = None
+            if "google_flights" in requested_sources:
+                browser = p.chromium.launch(headless=bool(CONFIG.get("headless", True)))
+                scraper = GoogleFlightsScraper(browser)
 
-                row = _store_result(db, route, result)
-                results.append(row)
-        finally:
-            if browser:
-                browser.close()
+            try:
+                for source in requested_sources:
+                    if source == "google_flights":
+                        result = _search_google_result(scraper, route)
+                    else:
+                        result = _search_maxmilhas_result(p, route)
+
+                    if result is None:
+                        continue
+
+                    row = _store_result(db, route, result, user_id=int(user["id"]), persist=True)
+                    row["cache_hit"] = False
+                    _set_manual_cached_result(route, source, row)
+                    results.append(row)
+            finally:
+                if browser:
+                    browser.close()
 
     if not results:
         return jsonify({"error": "Nenhum resultado foi retornado para a rota consultada."}), 502
@@ -1185,7 +1460,8 @@ def consulta():
             + "Resultados:\n"
             + "\n".join(detalhes)
         )
-        send_telegram_message(resumo)
+        if user:
+            send_user_telegram_message(int(user["id"]), resumo)
     except Exception:
         pass
 
@@ -1209,6 +1485,7 @@ def consulta():
                 "best_vendor": chosen["best_vendor"],
                 "best_vendor_price": chosen["best_vendor_price"],
                 "final_price_source": chosen["final_price_source"],
+                "cache_hit": bool(chosen.get("cache_hit")),
             },
             "resultados": results,
             "historico": {
@@ -1230,11 +1507,14 @@ def consulta_maxmilhas():
 
 @app.route("/historico", methods=["GET"])
 def historico():
+    user = current_user()
+    if not user:
+        return jsonify({"error": "forbidden"}), 403
     limit = request.args.get("limit", default=20, type=int)
     limit = max(1, min(limit, 200))
 
     db_path = Path(get_db_path())
-    if not db_path.exists():
+    if not mysql_enabled() and not db_path.exists():
         return jsonify({"total": 0, "items": []})
 
     db = Database(str(db_path))
@@ -1244,16 +1524,16 @@ def historico():
                price, currency, price_band, notes, url,
                best_vendor, best_vendor_price, booking_options_json
         FROM results
+        WHERE user_id = ?
         ORDER BY id DESC
         LIMIT ?
         """,
-        (limit,),
+        (int(user["id"]), limit),
     ).fetchall()
 
     items = [dict(r) for r in rows]
     for item in items:
         item["final_price_source"] = extract_final_price_source(item.get("notes"))
-    user = current_user()
     max_price = get_user_max_display_price(int(user["id"])) if user else None
     items = filter_rows_by_max_price(items, max_price)
     return jsonify({"total": len(items), "items": items})
@@ -1261,17 +1541,34 @@ def historico():
 
 @app.route("/historico/limpar", methods=["POST"])
 def limpar_historico():
+    user = current_user()
+    if not user:
+        return redirect(url_for("auth_login"))
+    if not is_admin_user(user):
+        return jsonify({"error": "forbidden"}), 403
     db = Database(get_db_path())
-    deleted = db.conn.execute("DELETE FROM results").rowcount
-    db.conn.commit()
+    deleted = db.clear_results_for_user(int(user["id"]))
     return jsonify({"status": "ok", "deleted": deleted})
 
 
 @app.route("/cron", methods=["GET"])
 def cron():
-    parsed = run_full_scan()
     user = current_user()
-    max_price = get_user_max_display_price(int(user["id"])) if user else None
+    if not user:
+        return redirect(url_for("auth_login"))
+    if not is_admin_user(user):
+        return jsonify({"error": "forbidden"}), 403
+    db = get_auth_db()
+    routes = _build_user_routes(db, int(user["id"]))
+    if not routes:
+        return jsonify({"status": "ok", "resultados": [], "last_run_at": _scan_last_run_at, "summary": "Nenhuma rota configurada para este usuario."})
+    results_db = Database(get_db_path())
+    try:
+        results_db.clear_results_for_user(int(user["id"]))
+    finally:
+        results_db.conn.close()
+    parsed = run_scan_for_routes(routes, user_id=int(user["id"]), persist=True)
+    max_price = get_user_max_display_price(int(user["id"]))
     parsed_filtered = filter_rows_by_max_price(parsed, max_price)
     notify_full_scan(parsed, trigger="manual", max_price=max_price)
     return jsonify({"status": "ok", "resultados": parsed_filtered, "last_run_at": _scan_last_run_at})
@@ -1289,10 +1586,19 @@ def internal_cron():
 
 @app.route("/cron-stream", methods=["GET"])
 def cron_stream():
+    user = current_user()
+    if not user:
+        return redirect(url_for("auth_login"))
+    if not is_admin_user(user):
+        return jsonify({"error": "forbidden"}), 403
     def event_stream():
-        user = current_user()
         max_price = get_user_max_display_price(int(user["id"])) if user else None
-        routes = build_db_queries(get_db_path())
+        auth_conn = get_auth_db()
+        routes = _build_user_routes(auth_conn, int(user["id"]))
+        if not routes:
+            yield f"data: {json.dumps({'type': 'start', 'total': 0})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'message': 'Nenhuma rota configurada para este usuario.'})}\n\n"
+            return
         total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
         yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
@@ -1304,13 +1610,14 @@ def cron_stream():
         try:
             parsed = []
             db = Database(get_db_path())
+            db.clear_results_for_user(int(user["id"]))
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=bool(CONFIG.get("headless", True)))
                 scraper = GoogleFlightsScraper(browser)
 
                 for idx, route in enumerate(routes, start=1):
                     result = _search_google_result(scraper, route)
-                    row = _store_result(db, route, result)
+                    row = _store_result(db, route, result, user_id=int(user["id"]), persist=True)
                     parsed.append(row)
                     if row.get("price") is None or max_price is None or float(row["price"]) <= max_price:
                         payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
@@ -1319,7 +1626,7 @@ def cron_stream():
 
                     maxmilhas_result = _search_maxmilhas_result(p, route)
                     if maxmilhas_result is not None:
-                        row = _store_result(db, route, maxmilhas_result)
+                        row = _store_result(db, route, maxmilhas_result, user_id=int(user["id"]), persist=True)
                         parsed.append(row)
                         if row.get("price") is None or max_price is None or float(row["price"]) <= max_price:
                             payload = {"type": "row", "index": len(parsed), "total": total, "item": row}
@@ -1380,36 +1687,19 @@ def auth_db_path() -> str:
 
 def get_auth_db():
     if "auth_db" not in g:
-        conn = sqlite3.connect(auth_db_path())
-        conn.row_factory = sqlite3.Row
-        g.auth_db = conn
+        g.auth_db = connect_db(auth_db_path())
     return g.auth_db
 
 
 def _current_iso_ts() -> str:
     return datetime.now().isoformat()
 
-def _ensure_user_routes_defaults(conn, user_id: int) -> None:
-    exists = conn.execute("SELECT 1 FROM user_routes WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
-    if exists:
-        return
-    now = _current_iso_ts()
-    for route in build_config_queries():
-        conn.execute("INSERT INTO user_routes (user_id, origin, destination, outbound_date, inbound_date, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            (user_id, route.origin, route.destination, route.outbound_date, route.inbound_date or "", now),
-        )
-    conn.commit()
-
 def _ensure_user_telegram_defaults(conn, user_id: int) -> None:
     exists = conn.execute("SELECT 1 FROM user_telegram WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
     if exists:
         return
-    token = os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
-    if not token and not chat_id:
-        return
     conn.execute("INSERT INTO user_telegram (user_id, bot_token, chat_id, updated_at) VALUES (?, ?, ?, ?)",
-        (user_id, token or "", chat_id or "", _current_iso_ts()),
+        (user_id, "", "", _current_iso_ts()),
     )
     conn.commit()
 
@@ -1417,18 +1707,28 @@ def _ensure_user_cron_defaults(conn, user_id: int) -> None:
     exists = conn.execute("SELECT 1 FROM user_cron WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
     if exists:
         return
-    schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
     now = _current_iso_ts()
-    conn.execute("INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at, last_run_at) VALUES (?, 1, ?, ?, NULL, ?, ?)",
-        (user_id, every_hours, schedule_minutes, now, now),
+    conn.execute("INSERT INTO user_cron (user_id, enabled, max_price_display, updated_at, last_run_at) VALUES (?, 1, NULL, ?, ?)",
+        (user_id, now, now),
     )
     conn.commit()
 
+
+def ensure_app_settings_defaults(conn) -> None:
+    exists = conn.execute("SELECT 1 FROM app_settings WHERE id = 1").fetchone()
+    if exists:
+        return
+    conn.execute(
+        "INSERT INTO app_settings (id, cron_enabled, schedule_minutes, updated_at) VALUES (1, 1, ?, ?)",
+        (DEFAULT_SCHEDULE_MINUTES, _current_iso_ts()),
+    )
+    conn.commit()
+
+
 def ensure_user_defaults(conn, user_id: int) -> None:
-    _ensure_user_routes_defaults(conn, user_id)
     _ensure_user_telegram_defaults(conn, user_id)
     _ensure_user_cron_defaults(conn, user_id)
+    ensure_app_settings_defaults(conn)
 
 
 
@@ -1436,90 +1736,202 @@ def ensure_user_defaults(conn, user_id: int) -> None:
 
 
 def init_auth_tables():
-    db = sqlite3.connect(auth_db_path())
-    cur = db.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
+    db = connect_db(auth_db_path())
+    if db.backend == "mysql":
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role VARCHAR(16) NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_routes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            origin TEXT NOT NULL,
-            destination TEXT NOT NULL,
-            outbound_date TEXT NOT NULL,
-            inbound_date TEXT DEFAULT '',
-            active INTEGER DEFAULT 1,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_routes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                origin VARCHAR(10) NOT NULL,
+                destination VARCHAR(10) NOT NULL,
+                outbound_date VARCHAR(32) NOT NULL,
+                inbound_date VARCHAR(32) DEFAULT '',
+                active TINYINT(1) DEFAULT 1,
+                created_at TEXT NOT NULL,
+                INDEX idx_user_routes_user_id (user_id)
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_telegram (
-            user_id INTEGER PRIMARY KEY,
-            bot_token TEXT,
-            chat_id TEXT,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_telegram (
+                user_id INT PRIMARY KEY,
+                bot_token TEXT,
+                chat_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_cron (
-            user_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 1,
-            every_hours INTEGER DEFAULT 3,
-            schedule_minutes INTEGER DEFAULT 60,
-            max_price_display REAL,
-            updated_at TEXT NOT NULL,
-            last_run_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_cron (
+                user_id INT PRIMARY KEY,
+                enabled TINYINT(1) DEFAULT 1,
+                every_hours INT DEFAULT 3,
+                schedule_minutes INT DEFAULT 60,
+                max_price_display DOUBLE NULL,
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            status TEXT NOT NULL,
-            summary TEXT,
-            trigger TEXT DEFAULT 'manual-user',
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INT PRIMARY KEY,
+                cron_enabled TINYINT(1) DEFAULT 1,
+                schedule_minutes INT DEFAULT 60,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    for ddl in [
-        "ALTER TABLE user_cron ADD COLUMN last_run_at TEXT",
-        "ALTER TABLE user_cron ADD COLUMN schedule_minutes INTEGER",
-        "ALTER TABLE user_cron ADD COLUMN max_price_display REAL",
-        "ALTER TABLE user_runs ADD COLUMN trigger TEXT DEFAULT 'manual-user'",
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_runs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status VARCHAR(32) NOT NULL,
+                summary TEXT,
+                `trigger` VARCHAR(64) DEFAULT 'manual-user',
+                INDEX idx_user_runs_user_id (user_id)
+            )
+            """
+        )
+    else:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                origin TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                outbound_date TEXT NOT NULL,
+                inbound_date TEXT DEFAULT '',
+                active INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_telegram (
+                user_id INTEGER PRIMARY KEY,
+                bot_token TEXT,
+                chat_id TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_cron (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 1,
+                every_hours INTEGER DEFAULT 3,
+                schedule_minutes INTEGER DEFAULT 60,
+                max_price_display REAL,
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY,
+                cron_enabled INTEGER DEFAULT 1,
+                schedule_minutes INTEGER DEFAULT 60,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                summary TEXT,
+                `trigger` TEXT DEFAULT 'manual-user',
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+    for column, definition in [
+        ("last_run_at", "last_run_at TEXT"),
+        ("schedule_minutes", "schedule_minutes INT DEFAULT 60" if db.backend == "mysql" else "schedule_minutes INTEGER"),
+        ("max_price_display", "max_price_display DOUBLE NULL" if db.backend == "mysql" else "max_price_display REAL"),
     ]:
-        try:
-            cur.execute(ddl)
-        except sqlite3.OperationalError:
-            pass
+        ensure_column(db, "user_cron", column, definition)
+
+    ensure_column(
+        db,
+        "user_runs",
+        "trigger",
+        "`trigger` VARCHAR(64) DEFAULT 'manual-user'" if db.backend == "mysql" else "`trigger` TEXT DEFAULT 'manual-user'",
+    )
+    ensure_column(
+        db,
+        "users",
+        "role",
+        "role VARCHAR(16) NOT NULL DEFAULT 'user'" if db.backend == "mysql" else "role TEXT NOT NULL DEFAULT 'user'",
+    )
+    ensure_column(
+        db,
+        "app_settings",
+        "cron_enabled",
+        "cron_enabled TINYINT(1) DEFAULT 1" if db.backend == "mysql" else "cron_enabled INTEGER DEFAULT 1",
+    )
+    ensure_column(
+        db,
+        "app_settings",
+        "schedule_minutes",
+        "schedule_minutes INT DEFAULT 60" if db.backend == "mysql" else "schedule_minutes INTEGER DEFAULT 60",
+    )
 
     try:
-        cur.execute("UPDATE user_cron SET schedule_minutes = COALESCE(schedule_minutes, CASE WHEN every_hours > 0 THEN every_hours * 60 END, ?) WHERE schedule_minutes IS NULL", (DEFAULT_SCHEDULE_MINUTES,))
-        cur.execute("UPDATE user_cron SET every_hours = 0 WHERE schedule_minutes < 60")
-    except sqlite3.OperationalError:
+        db.execute("UPDATE users SET role = COALESCE(role, 'user') WHERE role IS NULL OR role = ''")
+        db.execute(
+            "UPDATE user_cron SET schedule_minutes = COALESCE(schedule_minutes, CASE WHEN every_hours > 0 THEN every_hours * 60 END, ?) WHERE schedule_minutes IS NULL",
+            (DEFAULT_SCHEDULE_MINUTES,),
+        )
+        db.execute("UPDATE user_cron SET every_hours = 0 WHERE schedule_minutes < 60")
+    except DatabaseOperationalError:
         pass
 
     db.commit()
+    ensure_app_settings_defaults(db)
     db.close()
 
 
@@ -1530,11 +1942,39 @@ def close_auth_db(_exc):
         db.close()
 
 
+def _user_field(user, field: str, default=None):
+    if not user:
+        return default
+    try:
+        value = user[field]
+    except Exception:
+        value = getattr(user, field, default)
+    return default if value is None else value
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not session.get("user_id"):
             return redirect(url_for("auth_login"))
+        if not current_user():
+            session.clear()
+            return redirect(url_for("auth_login"))
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return redirect(url_for("auth_login"))
+        if str(_user_field(user, "role", "user")) != "admin":
+            if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+                return jsonify({"error": "forbidden"}), 403
+            return redirect(url_for("painel", _anchor="rotas"))
         return fn(*args, **kwargs)
 
     return wrapper
@@ -1545,7 +1985,71 @@ def current_user():
     if not uid:
         return None
     db = get_auth_db()
-    return db.execute("SELECT id, email FROM users WHERE id = ?", (uid,)).fetchone()
+    return db.execute("SELECT id, email, role FROM users WHERE id = ?", (uid,)).fetchone()
+
+
+def is_admin_user(user) -> bool:
+    return bool(user and str(_user_field(user, "role", "user")) == "admin")
+
+
+def _user_telegram_upsert_sql() -> str:
+    if mysql_enabled():
+        return (
+            "INSERT INTO user_telegram (user_id, bot_token, chat_id, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE "
+            "bot_token = VALUES(bot_token), "
+            "chat_id = VALUES(chat_id), "
+            "updated_at = VALUES(updated_at)"
+        )
+    return """
+        INSERT INTO user_telegram (user_id, bot_token, chat_id, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          bot_token = excluded.bot_token,
+          chat_id = excluded.chat_id,
+          updated_at = excluded.updated_at
+    """
+
+
+def _user_cron_upsert_sql() -> str:
+    if mysql_enabled():
+        return (
+            "INSERT INTO user_cron (user_id, enabled, max_price_display, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE "
+            "enabled = VALUES(enabled), "
+            "max_price_display = VALUES(max_price_display), "
+            "updated_at = VALUES(updated_at)"
+        )
+    return """
+        INSERT INTO user_cron (user_id, enabled, max_price_display, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          enabled = excluded.enabled,
+          max_price_display = excluded.max_price_display,
+          updated_at = excluded.updated_at
+    """
+
+
+def _app_settings_upsert_sql() -> str:
+    if mysql_enabled():
+        return (
+            "INSERT INTO app_settings (id, cron_enabled, schedule_minutes, updated_at) "
+            "VALUES (1, ?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE "
+            "cron_enabled = VALUES(cron_enabled), "
+            "schedule_minutes = VALUES(schedule_minutes), "
+            "updated_at = VALUES(updated_at)"
+        )
+    return """
+        INSERT INTO app_settings (id, cron_enabled, schedule_minutes, updated_at)
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          cron_enabled = excluded.cron_enabled,
+          schedule_minutes = excluded.schedule_minutes,
+          updated_at = excluded.updated_at
+    """
 
 
 @app.route("/auth/register", methods=["GET", "POST"])
@@ -1560,12 +2064,12 @@ def auth_register():
             db = get_auth_db()
             try:
                 db.execute(
-                    "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                    (email, generate_password_hash(password), datetime.now().isoformat()),
+                    "INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+                    (email, generate_password_hash(password), "user", datetime.now().isoformat()),
                 )
                 db.commit()
                 return redirect(url_for("auth_login"))
-            except sqlite3.IntegrityError:
+            except DatabaseIntegrityError:
                 error = "Esse email já está cadastrado."
 
     return render_template_string(
@@ -1665,6 +2169,7 @@ def auth_logout():
 def painel():
     db = get_auth_db()
     user = current_user()
+    is_admin = is_admin_user(user)
     restart_status = (request.args.get("restart_status") or "").strip().lower()
     restart_message = (request.args.get("restart_message") or "").strip()
     ensure_user_defaults(db, user["id"])
@@ -1673,20 +2178,17 @@ def painel():
         (user["id"],),
     ).fetchall()
     tg = db.execute("SELECT bot_token, chat_id FROM user_telegram WHERE user_id = ?", (user["id"],)).fetchone()
-    cron = db.execute("SELECT enabled, every_hours, schedule_minutes, max_price_display FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
-    cron_minutes = DEFAULT_SCHEDULE_MINUTES
+    cron = db.execute("SELECT enabled, max_price_display, last_run_at FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
+    cron_settings = get_global_cron_settings()
+    cron_minutes = int(cron_settings["schedule_minutes"])
+    cron_enabled = int(cron_settings["cron_enabled"])
     cron_max_price = ""
     if cron is not None:
-        schedule_minutes = cron["schedule_minutes"]
-        if schedule_minutes is not None:
-            cron_minutes = int(schedule_minutes)
-        elif cron["every_hours"] is not None:
-            cron_minutes = max(1, int(cron["every_hours"]) * 60)
         if cron["max_price_display"] is not None:
-            cron_max_price = str(int(cron["max_price_display"])) if float(cron["max_price_display"]).is_integer() else str(cron["max_price_display"])
+            cron_max_price = _format_brl_input(float(cron["max_price_display"]))
     last_run = db.execute("SELECT started_at, finished_at, status, summary FROM user_runs WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user["id"],)).fetchone()
-    default_tg_bot = os.getenv("TELEGRAM_BOT_TOKEN") or CONFIG.get("telegram_bot_token", "")
-    default_tg_chat = os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id", "")
+    last_finished_label = _format_time_hhmm(last_run["finished_at"] if last_run else None)
+    next_run_label = _build_next_run_label(cron["last_run_at"] if cron else None, cron_enabled, cron_minutes)
 
     return render_template_string(
         """
@@ -1720,19 +2222,24 @@ def painel():
             <div class='row'>
               <aside class='col-md-3 col-lg-2 p-0 sidebar'>
                 <div class='brand'><i class='bi bi-activity'></i> VooBot Admin</div>
-                <a href='#rotas'><i class='bi bi-signpost-split me-2'></i>Rotas</a>
                 <a href='#consultas'><i class='bi bi-window me-2'></i>Consultas</a>
+                <a href='#rotas'><i class='bi bi-signpost-split me-2'></i>Rotas</a>
                 <a href='#telegram'><i class='bi bi-telegram me-2'></i>Telegram</a>
+                {% if is_admin %}
                 <a href='#cron'><i class='bi bi-clock-history me-2'></i>Cron</a>
+                {% endif %}
                 <a href='{{ url_for("auth_logout") }}'><i class='bi bi-box-arrow-right me-2'></i>Sair</a>
               </aside>
               <main class='col-md-9 col-lg-10 p-0'>
                 <div class='topbar d-flex justify-content-between align-items-center px-4 py-3'>
-                  <div><strong>Painel</strong> <span class='text-muted'>/ Dashboard</span></div>
+                  <div>
+                    <strong>Painel</strong> <span class='text-muted'>/ Dashboard</span>
+                    <div class='small text-muted'>Ultima consulta: {{ last_finished_label }} | Proxima: {{ next_run_label }}</div>
+                  </div>
                   <div class='d-flex align-items-center gap-2'>
                     <button class='btn btn-sm btn-outline-secondary' type='button' onclick='toggleSidebar()'><i class='bi bi-list'></i></button>
                     <button class='btn btn-sm btn-outline-secondary' type='button' onclick='toggleTheme()'><i class='bi bi-moon-stars'></i></button>
-                    <div class='text-muted small'>{{user['email']}}</div>
+                    <div class='text-muted small'>{{user['email']}}{% if is_admin %} · admin{% endif %}</div>
                   </div>
                 </div>
                 <div class='p-4'>
@@ -1741,43 +2248,55 @@ def painel():
                 {% endif %}
                 <div class='row g-3 mb-3'>
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Rotas</div><div class='h4 mb-0'>{{ routes|length }}</div></div></div></div>
-                  <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Cron</div><div class='h6 mb-0'>{% if not cron or cron['enabled'] %}Ativo{% else %}Inativo{% endif %} ({{ cron_minutes }} min)</div></div></div></div>
+                  {% if is_admin %}
+                  <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Cron</div><div class='h6 mb-0'>{% if cron_enabled %}Ativo{% else %}Inativo{% endif %} ({{ cron_minutes }} min)</div></div></div></div>
+                  {% endif %}
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Última execução</div><div class='small mb-0'>{% if last_run %}{{last_run['status']}}{% else %}sem execução{% endif %}</div></div></div></div>
                 </div>
 
                 <div class='card mb-3 shadow-sm dashboard-section' id='rotas'>
                   <div class='card-header'><i class='bi bi-signpost-split me-2'></i>Rotas configuradas</div>
                   <div class='card-body'>
-                    <form method='post' action='{{ url_for("add_route") }}' class='row g-2 mb-3 align-items-end'>
+                    <form method='post' action='{{ url_for("add_route") }}' class='row g-2 mb-3 align-items-end' autocomplete='off'>
                       <div class='col-md-2'>
                         <label class='form-label small text-uppercase mb-1'>Origem</label>
                         <select class='form-select form-select-sm' name='origin' required>
+                          <option value='' selected>Selecione</option>
                           {% for code, label in airport_options %}
-                            <option value='{{ code }}' {% if code == 'PVH' %}selected{% endif %}>{{ label }}</option>
+                            <option value='{{ code }}'>{{ label }}</option>
                           {% endfor %}
                         </select>
                       </div>
                       <div class='col-md-2'>
                         <label class='form-label small text-uppercase mb-1'>Destino</label>
                         <select class='form-select form-select-sm' name='destination' required>
+                          <option value='' selected>Selecione</option>
                           {% for code, label in airport_options %}
-                            <option value='{{ code }}' {% if code == 'JPA' %}selected{% endif %}>{{ label }}</option>
+                            <option value='{{ code }}'>{{ label }}</option>
                           {% endfor %}
                         </select>
                       </div>
                       <div class='col-md-3'>
                         <label class='form-label small text-uppercase mb-1'>Ida</label>
-                        <input class='form-control form-control-sm' name='outbound_date' type='date' required>
+                          <input class='form-control form-control-sm' name='outbound_date' type='date' value='' autocomplete='off' required>
                       </div>
                       <div class='col-md-3'>
                         <label class='form-label small text-uppercase mb-1'>Volta</label>
-                        <input class='form-control form-control-sm' name='inbound_date' type='date'>
+                          <input class='form-control form-control-sm' name='inbound_date' type='date' value='' autocomplete='off'>
                       </div>
                       <div class='col-md-2 d-grid'>
                         <button class='btn btn-primary btn-sm' type='submit'>Adicionar</button>
                       </div>
                     </form>
-                    <div class='small text-muted mb-3'>As datas padrão globais de ida foram reduzidas para 04 e 05 de junho.</div>
+                    <form method='post' action='{{ url_for("save_route_filters") }}' class='row g-2 mb-3 align-items-end'>
+                      <div class='col-md-4'>
+                        <label class='form-label small text-uppercase mb-1'>Filtro de valor</label>
+                        <input class='form-control form-control-sm js-brl-input' name='max_price_display' type='text' inputmode='decimal' placeholder='Ex: 1.250,00' value='{{ cron_max_price }}'>
+                      </div>
+                      <div class='col-md-3 d-grid'>
+                        <button class='btn btn-outline-primary btn-sm' type='submit'>Salvar filtro</button>
+                      </div>
+                    </form>
                     <div class='table-responsive border rounded'>
                       <table class='table table-hover table-striped mb-0 align-middle'>
                         <thead class='table-light'>
@@ -1836,11 +2355,12 @@ def painel():
                   </div>
                   <div class='card-body'>
                     <section class='mb-4'>
-                      <div class='row g-2 align-items-end'>
+                      <div class='row g-2 align-items-end' autocomplete='off'>
                         <div class='col-md-3'>
                           <label class='form-label small text-uppercase'>Origem</label>
                           <select id='origin' class='form-select form-select-sm'>
-                            <option value='PVH' selected>PVH — Porto Velho (RO)</option>
+                            <option value='' selected>Selecione a origem</option>
+                            <option value='PVH'>PVH — Porto Velho (RO)</option>
                             <option value='BPS'>BPS — Porto Seguro (BA)</option>
                             <option value='RIO'>RIO — Rio de Janeiro (RJ)</option>
                             <option value='SAO'>SAO — São Paulo (SP)</option>
@@ -1873,7 +2393,8 @@ def painel():
                         <div class='col-md-3'>
                           <label class='form-label small text-uppercase'>Destino</label>
                           <select id='destination' class='form-select form-select-sm'>
-                            <option value='JPA' selected>JPA — João Pessoa (PB)</option>
+                            <option value='' selected>Selecione o destino</option>
+                            <option value='JPA'>JPA — João Pessoa (PB)</option>
                             <option value='BPS'>BPS — Porto Seguro (BA)</option>
                             <option value='REC'>REC — Recife (PE)</option>
                             <option value='NAT'>NAT — Natal (RN)</option>
@@ -1905,11 +2426,11 @@ def painel():
                         </div>
                         <div class='col-md-2'>
                           <label class='form-label small text-uppercase'>Ida</label>
-                          <input id='outbound_date' type='date' class='form-control form-control-sm' value='2026-06-05' />
+                          <input id='outbound_date' type='date' class='form-control form-control-sm' value='' autocomplete='off' />
                         </div>
                         <div class='col-md-2'>
                           <label class='form-label small text-uppercase'>Volta</label>
-                          <input id='inbound_date' type='date' class='form-control form-control-sm' value='' />
+                          <input id='inbound_date' type='date' class='form-control form-control-sm' value='' autocomplete='off' />
                         </div>
                         <div class='col-12 col-md-1 d-grid'>
                           <button id='btn-consultar' class='btn btn-primary btn-sm' onclick='consultar()'>Consultar</button>
@@ -1940,6 +2461,7 @@ def painel():
                         </table>
                       </div>
                     </section>
+                    {% if is_admin %}
                     <section class='mb-4'>
                       <div class='d-flex justify-content-between align-items-center mb-2'>
                         <h6 class='text-uppercase text-muted m-0'>Buscar todos (cron)</h6>
@@ -1965,6 +2487,7 @@ def painel():
                         </table>
                       </div>
                     </section>
+                    {% endif %}
                     <section class='mb-4'>
                       <div class='d-flex justify-content-between align-items-center mb-2'>
                         <h6 class='text-uppercase text-muted m-0'>Histórico</h6>
@@ -1996,31 +2519,6 @@ def painel():
                         </table>
                       </div>
                     </section>
-                    <section>
-                      <div class='d-flex justify-content-between align-items-center mb-2'>
-                        <h6 class='text-uppercase text-muted m-0'>Rotas configuradas</h6>
-                        <button class='btn btn-outline-secondary btn-sm' type='button' onclick='rotas()'>Atualizar</button>
-                      </div>
-                      <div id='rotas-loading' class='text-muted mb-2' style='display:none;'>Carregando rotas...</div>
-                      <div class='table-responsive'>
-                        <table class='table table-striped table-hover align-middle text-center mb-0' id='rotas-table'>
-                          <thead class='table-light'>
-                            <tr>
-                              <th>Origem</th>
-                              <th>Destino</th>
-                              <th>Ida</th>
-                              <th>Volta</th>
-                              <th>Tipo</th>
-                            </tr>
-                          </thead>
-                          <tbody id='rotas-body'>
-                            <tr>
-                              <td colspan='5' class='text-center text-muted'>Clique em “Atualizar” para carregar.</td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-                    </section>
                   </div>
                 </div>
 
@@ -2028,24 +2526,24 @@ def painel():
                   <div class='card-header'><i class='bi bi-telegram me-2'></i>Telegram do usuário</div>
                   <div class='card-body'>
                     <form method='post' action='{{ url_for("save_telegram") }}' class='row g-2'>
-                      <div class='col-md-6'><input class='form-control' name='bot_token' placeholder='Bot token' value='{{ tg["bot_token"] if tg and tg["bot_token"] else default_tg_bot }}'></div>
-                      <div class='col-md-4'><input class='form-control' name='chat_id' placeholder='Chat ID' value='{{ tg["chat_id"] if tg and tg["chat_id"] else default_tg_chat }}'></div>
+                      <div class='col-md-6'><input class='form-control' name='bot_token' placeholder='Bot token' value='{{ tg["bot_token"] if tg and tg["bot_token"] else "" }}'></div>
+                      <div class='col-md-4'><input class='form-control' name='chat_id' placeholder='Chat ID' value='{{ tg["chat_id"] if tg and tg["chat_id"] else "" }}'></div>
                       <div class='col-md-2 d-grid'><button class='btn btn-success' type='submit'>Salvar</button></div>
                     </form>
                   </div>
                 </div>
 
+                {% if is_admin %}
                 <div class='card shadow-sm dashboard-section d-none' id='cron'>
                   <div class='card-header'><i class='bi bi-clock-history me-2'></i>Cron do usuário</div>
                   <div class='card-body'>
                     <form method='post' action='{{ url_for("save_cron") }}' class='row g-2 align-items-center'>
                       <div class='col-md-2 form-check ms-2'>
-                        <input class='form-check-input' type='checkbox' name='enabled' id='enabled' {% if not cron or cron['enabled'] %}checked{% endif %}>
+                        <input class='form-check-input' type='checkbox' name='enabled' id='enabled' {% if cron_enabled %}checked{% endif %}>
                         <label class='form-check-label' for='enabled'>Ativo</label>
                       </div>
                       <div class='col-md-3'><input class='form-control' name='schedule_minutes' type='number' min='1' max='1440' step='1' value='{{ cron_minutes }}'></div>
-                      <div class='col-md-4'><input class='form-control' name='max_price_display' type='number' min='0' step='0.01' placeholder='Preço máximo exibido por trecho' value='{{ cron_max_price }}'></div>
-                      <div class='col-md-2 d-grid'><button class='btn btn-primary' type='submit'>Salvar</button></div>
+                      <div class='col-md-3 d-grid'><button class='btn btn-primary' type='submit'>Salvar</button></div>
                     </form>
                     <form method='post' action='{{ url_for("run_now_user") }}' class='mt-3'>
                       <button class='btn btn-warning' type='submit'>Executar agora</button>
@@ -2069,6 +2567,7 @@ def painel():
                     </div>
                   </div>
                 </div>
+                {% endif %}
 
 
                 </div>
@@ -2077,6 +2576,26 @@ def painel():
           </div>
         <script src='{{ url_for("static", filename="consulta-app.js") }}'></script>
         <script>
+          function formatBrlInputValue(value) {
+            const digits = String(value || '').replace(/\\D/g, '');
+            if (!digits) return '';
+            const cents = Number(digits) / 100;
+            return cents.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          }
+          function bindBrlInputs() {
+            document.querySelectorAll('.js-brl-input').forEach((el) => {
+              el.addEventListener('input', () => {
+                el.value = formatBrlInputValue(el.value);
+              });
+            });
+          }
+          function resetQuickConsultFields() {
+            const ids = ['origin', 'destination', 'outbound_date', 'inbound_date'];
+            ids.forEach((id) => {
+              const el = document.getElementById(id);
+              if (el) el.value = '';
+            });
+          }
           function showSection(hash) {
             document.querySelectorAll('.dashboard-section').forEach(el => el.classList.add('d-none'));
             var target = document.getElementById(hash);
@@ -2084,8 +2603,8 @@ def painel():
               target.classList.remove('d-none');
               localStorage.setItem('adminActiveTab', hash);
             } else {
-              document.getElementById('rotas').classList.remove('d-none');
-              localStorage.setItem('adminActiveTab', 'rotas');
+              document.getElementById('consultas').classList.remove('d-none');
+              localStorage.setItem('adminActiveTab', 'consultas');
             }
             document.querySelectorAll('.sidebar a').forEach(el => el.classList.remove('fw-bold', 'text-white'));
             var activeLink = document.querySelector('.sidebar a[href="#' + hash + '"]');
@@ -2098,7 +2617,9 @@ def painel():
             }
           });
           window.addEventListener('load', () => {
-            let hash = window.location.hash.substring(1) || localStorage.getItem('adminActiveTab') || 'rotas';
+            bindBrlInputs();
+            resetQuickConsultFields();
+            let hash = window.location.hash.substring(1) || localStorage.getItem('adminActiveTab') || 'consultas';
             showSection(hash);
           });
           function toggleTheme() {
@@ -2121,13 +2642,15 @@ def painel():
         routes=routes,
         tg=tg,
         cron=cron,
+        cron_enabled=cron_enabled,
         cron_minutes=cron_minutes,
         cron_max_price=cron_max_price,
         last_run=last_run,
-        default_tg_bot=default_tg_bot,
-        default_tg_chat=default_tg_chat,
+        last_finished_label=last_finished_label,
+        next_run_label=next_run_label,
         airport_options=AIRPORT_OPTIONS,
         restart_command_configured=bool(PANEL_RESTART_COMMAND),
+        is_admin=is_admin,
     )
 
 
@@ -2190,14 +2713,7 @@ def save_telegram():
     db = get_auth_db()
     user = current_user()
     db.execute(
-        """
-        INSERT INTO user_telegram (user_id, bot_token, chat_id, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          bot_token = excluded.bot_token,
-          chat_id = excluded.chat_id,
-          updated_at = excluded.updated_at
-        """,
+        _user_telegram_upsert_sql(),
         (
             user["id"],
             request.form.get("bot_token", "").strip(),
@@ -2209,8 +2725,26 @@ def save_telegram():
     return redirect(url_for("painel"))
 
 
+@app.route("/painel/filters", methods=["POST"])
+@login_required
+def save_route_filters():
+    db = get_auth_db()
+    user = current_user()
+    max_price_display_raw = request.form.get("max_price_display", "").strip()
+    max_price_display = _parse_brl_input(max_price_display_raw)
+    current = db.execute("SELECT enabled FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
+    enabled = int(current["enabled"] or 1) if current else 1
+    db.execute(
+        _user_cron_upsert_sql(),
+        (user["id"], enabled, max_price_display, datetime.now().isoformat()),
+    )
+    db.commit()
+    return redirect(url_for("painel", _anchor="rotas"))
+
+
 @app.route("/painel/run-now", methods=["POST"])
 @login_required
+@admin_required
 def run_now_user():
     user = current_user()
     try:
@@ -2222,6 +2756,7 @@ def run_now_user():
 
 @app.route("/painel/restart", methods=["POST"])
 @login_required
+@admin_required
 def restart_service():
     ok, message, should_exit = trigger_service_restart()
     if not ok:
@@ -2238,28 +2773,14 @@ def restart_service():
 
 @app.route("/painel/cron", methods=["POST"])
 @login_required
+@admin_required
 def save_cron():
     db = get_auth_db()
-    user = current_user()
     enabled = 1 if request.form.get("enabled") else 0
     schedule_minutes = max(1, min(1440, int(request.form.get("schedule_minutes", DEFAULT_SCHEDULE_MINUTES))))
-    max_price_display_raw = request.form.get("max_price_display", "").strip()
-    max_price_display = None
-    if max_price_display_raw:
-        max_price_display = max(0.0, float(max_price_display_raw))
-    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
     db.execute(
-        """
-        INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          enabled = excluded.enabled,
-          every_hours = excluded.every_hours,
-          schedule_minutes = excluded.schedule_minutes,
-          max_price_display = excluded.max_price_display,
-          updated_at = excluded.updated_at
-        """,
-        (user["id"], enabled, every_hours, schedule_minutes, max_price_display, datetime.now().isoformat()),
+        _app_settings_upsert_sql(),
+        (enabled, schedule_minutes, datetime.now().isoformat()),
     )
     db.commit()
     return redirect(url_for("painel", _anchor="cron"))

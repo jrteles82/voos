@@ -20,10 +20,12 @@ Instalação:
     PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers .venv/bin/playwright install chromium
 
 Uso:
-    export TELEGRAM_BOT_TOKEN='...'
-    export TELEGRAM_CHAT_ID='...'
     .venv/bin/python skyscanner.py run-once
     .venv/bin/python skyscanner.py daemon
+
+Telegram:
+- opcional, configurado apenas em `skyscanner-config.json`
+- sem `telegram_bot_token` e `telegram_chat_id`, o script não envia alerta
 
 Observações:
 - Como o site pode mudar, os seletores podem precisar de ajustes.
@@ -37,7 +39,6 @@ import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -49,6 +50,7 @@ from urllib.parse import quote
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(__file__).with_name(".playwright-browsers")))
 
 import requests
+from db import DatabaseOperationalError, connect_db, ensure_column, mysql_enabled
 
 try:
     from playwright.sync_api import Browser, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -80,8 +82,8 @@ DEFAULT_CONFIG = {
     "settle_seconds": 2,
     "request_pause_seconds": 0.2,
     "db_path": str(Path(__file__).with_name("flight_tracker_browser.db")),
-    "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "8651349481:AAHRdUKl7Dx-GJ76Yy_kQiJ4jA6TCaQ8r4g"),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "1748352987"),
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
     "price_alert_brl": 1800.0,
     "drop_alert_percent": 8.0,
     "target_site": "google_flights",
@@ -156,63 +158,96 @@ def format_brl(value: Optional[float]) -> str:
 
 class Database:
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = connect_db(path)
         self._init_schema()
 
     def _init_schema(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                site TEXT NOT NULL,
-                origin TEXT NOT NULL,
-                destination TEXT NOT NULL,
-                outbound_date TEXT NOT NULL,
-                inbound_date TEXT NOT NULL,
-                price REAL,
-                currency TEXT,
-                url TEXT,
-                notes TEXT,
-                price_band TEXT,
-                best_vendor TEXT,
-                best_vendor_price REAL,
-                booking_options_json TEXT
+        if self.conn.backend == "mysql":
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS results (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NULL,
+                    created_at TEXT NOT NULL,
+                    site VARCHAR(50) NOT NULL,
+                    origin VARCHAR(10) NOT NULL,
+                    destination VARCHAR(10) NOT NULL,
+                    outbound_date VARCHAR(32) NOT NULL,
+                    inbound_date VARCHAR(32) NOT NULL,
+                    price DOUBLE NULL,
+                    currency VARCHAR(10),
+                    url TEXT,
+                    notes TEXT,
+                    price_band VARCHAR(32),
+                    best_vendor VARCHAR(255),
+                    best_vendor_price DOUBLE NULL,
+                    booking_options_json LONGTEXT
+                )
+                """
             )
-            """
-        )
-        cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_results_route
-            ON results (origin, destination, outbound_date, inbound_date, created_at)
-            """
-        )
+            try:
+                self.conn.execute(
+                    """
+                    CREATE INDEX idx_results_route
+                    ON results (origin, destination, outbound_date, inbound_date, created_at(255))
+                    """
+                )
+            except Exception:
+                pass
+            self.conn.commit()
+        else:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    site TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    outbound_date TEXT NOT NULL,
+                    inbound_date TEXT NOT NULL,
+                    price REAL,
+                    currency TEXT,
+                    url TEXT,
+                    notes TEXT,
+                    price_band TEXT,
+                    best_vendor TEXT,
+                    best_vendor_price REAL,
+                    booking_options_json TEXT
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_results_route
+                ON results (origin, destination, outbound_date, inbound_date, created_at)
+                """
+            )
+            self.conn.commit()
 
-        # Migrações leves para bases já existentes
-        for ddl in [
-            "ALTER TABLE results ADD COLUMN best_vendor TEXT",
-            "ALTER TABLE results ADD COLUMN best_vendor_price REAL",
-            "ALTER TABLE results ADD COLUMN booking_options_json TEXT",
+        for column, definition in [
+            ("user_id", "user_id INT NULL" if self.conn.backend == "mysql" else "user_id INTEGER"),
+            ("best_vendor", "best_vendor VARCHAR(255)" if self.conn.backend == "mysql" else "best_vendor TEXT"),
+            ("best_vendor_price", "best_vendor_price DOUBLE NULL"),
+            ("booking_options_json", "booking_options_json LONGTEXT" if self.conn.backend == "mysql" else "booking_options_json TEXT"),
         ]:
             try:
-                cur.execute(ddl)
-            except sqlite3.OperationalError:
+                ensure_column(self.conn, "results", column, definition)
+            except DatabaseOperationalError:
                 pass
 
-        self.conn.commit()
-
-    def save(self, result: FlightResult, price_band: str) -> None:
+    def save(self, result: FlightResult, price_band: str, user_id: Optional[int] = None) -> None:
         self.conn.execute(
             """
             INSERT INTO results (
-                created_at, site, origin, destination, outbound_date, inbound_date,
+                user_id, created_at, site, origin, destination, outbound_date, inbound_date,
                 price, currency, url, notes, price_band,
                 best_vendor, best_vendor_price, booking_options_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                user_id,
                 utc_now_iso(),
                 result.site,
                 result.origin,
@@ -230,6 +265,11 @@ class Database:
             ),
         )
         self.conn.commit()
+
+    def clear_results_for_user(self, user_id: int) -> int:
+        deleted = self.conn.execute("DELETE FROM results WHERE user_id = ?", (user_id,)).rowcount
+        self.conn.commit()
+        return int(deleted or 0)
 
     def stats_for(self, route: RouteQuery) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         row = self.conn.execute(
@@ -310,10 +350,9 @@ def build_db_routes_from_rows(rows):
 
 
 def load_user_routes_from_db(path: str) -> List[RouteQuery]:
-    if not Path(path).exists():
+    if not mysql_enabled() and not Path(path).exists():
         return []
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
+    conn = connect_db(path)
     try:
         rows = conn.execute("SELECT origin, destination, outbound_date, inbound_date FROM user_routes WHERE active = 1").fetchall()
         return build_db_routes_from_rows(rows)

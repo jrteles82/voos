@@ -67,6 +67,7 @@ _scan_lock = threading.Lock()
 _scan_last_run_at = None
 _user_scheduler_started = False
 SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "1.35"))
+SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.10")))
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
@@ -716,18 +717,21 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
     if not groups:
         return None
 
-    title_font = _load_font(20, bold=True)
-    header_font = _load_font(16, bold=True)
-    body_font = _load_font(15)
-    small_font = _load_font(14)
+    def scaled(value: int) -> int:
+        return max(1, int(round(value * SCAN_IMAGE_SCALE)))
 
-    padding_x = 14
-    padding_y = 14
-    row_h = 36
-    section_h = 34
-    title_h = 30
-    meta_h = 24
-    col_widths = [170, 130, 125, 290]
+    title_font = _load_font(scaled(20), bold=True)
+    header_font = _load_font(scaled(16), bold=True)
+    body_font = _load_font(scaled(15))
+    small_font = _load_font(scaled(14))
+
+    padding_x = scaled(14)
+    padding_y = scaled(14)
+    row_h = scaled(36)
+    section_h = scaled(34)
+    title_h = scaled(30)
+    meta_h = scaled(24)
+    col_widths = [scaled(170), scaled(130), scaled(125), scaled(290)]
     headers = ["Rota", "Data voo", "Preço", "Onde comprar mais barato"]
     height = (
         padding_y * 2
@@ -772,7 +776,7 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
     for idx, header in enumerate(headers):
         w = col_widths[idx]
         draw.rectangle([x, y, x + w, y + row_h], fill=colors["header_bg"], outline=colors["border"])
-        draw.text((x + 10, y + 9), header, font=header_font, fill=colors["text"])
+        draw.text((x + scaled(10), y + scaled(9)), header, font=header_font, fill=colors["text"])
         x += w
     y += row_h
 
@@ -782,8 +786,8 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
         caption = f"{title} (menor → maior preço)"
         caption_bbox = draw.textbbox((0, 0), caption, font=header_font)
         caption_width = caption_bbox[2] - caption_bbox[0]
-        caption_x = x0 + max(0, (table_w - caption_width) / 2)
-        draw.text((caption_x, y + 7), caption, font=header_font, fill=colors["text"])
+        caption_x = x0 + max(0, int((table_w - caption_width) / 2))
+        draw.text((caption_x, y + scaled(7)), caption, font=header_font, fill=colors["text"])
         y += section_h
 
         highlight_axis = "destination" if title.startswith("IDAS") else "origin"
@@ -797,30 +801,34 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
             highlight_color = CITY_HIGHLIGHT_COLORS.get(highlight_value, colors["text"])
             destination_label = destination_txt
             origin_part = f"{origin_txt} → "
-            draw.text((x0 + 10, y + 9), origin_part, font=body_font, fill=colors["text"])
-            dest_x = x0 + 10 + draw.textlength(origin_part, font=body_font)
-            draw.text((dest_x, y + 9), destination_label, font=body_font, fill=highlight_color)
+            draw.text((x0 + scaled(10), y + scaled(9)), origin_part, font=body_font, fill=colors["text"])
+            dest_x = int(x0 + scaled(10) + draw.textlength(origin_part, font=body_font))
+            draw.text((dest_x, y + scaled(9)), destination_label, font=body_font, fill=highlight_color)
 
             date_txt = str(row.get("outbound_date") or "")
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
-            date_x = x0 + col_widths[0] + 10
+            date_x = x0 + col_widths[0] + scaled(10)
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
             badge_bbox = draw.textbbox((0, 0), date_txt, font=small_font)
-            badge_w = (badge_bbox[2] - badge_bbox[0]) + 16
-            draw.rounded_rectangle([date_x, y + 7, date_x + badge_w, y + 28], radius=8, fill=badge_fill)
-            draw.text((date_x + 8, y + 10), date_txt, font=small_font, fill=colors["text"])
+            badge_w = (badge_bbox[2] - badge_bbox[0]) + scaled(16)
+            draw.rounded_rectangle(
+                [date_x, y + scaled(7), date_x + badge_w, y + scaled(28)],
+                radius=scaled(8),
+                fill=badge_fill,
+            )
+            draw.text((date_x + scaled(8), y + scaled(10)), date_txt, font=small_font, fill=colors["text"])
 
-            price_x = x0 + col_widths[0] + col_widths[1] + 10
-            draw.text((price_x, y + 9), price_txt, font=header_font, fill=colors["price"])
+            price_x = x0 + col_widths[0] + col_widths[1] + scaled(10)
+            draw.text((price_x, y + scaled(9)), price_txt, font=header_font, fill=colors["price"])
 
-            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + 10
-            draw.text((vendor_x, y + 9), vendor_txt[:34], font=body_font, fill=colors["text"])
+            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(10)
+            draw.text((vendor_x, y + scaled(9)), vendor_txt[:34], font=body_font, fill=colors["text"])
             y += row_h
 
         if group_idx != len(groups) - 1:
-            y += 8
+            y += scaled(8)
     tmp = NamedTemporaryFile(prefix="telegram_scan_", suffix=".png", delete=False)
     tmp.close()
     image.save(tmp.name, format="PNG")

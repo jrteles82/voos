@@ -22,7 +22,12 @@ DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
 OWNER_TELEGRAM_ID = "1748352987"
 MAX_ROUTES_DEFAULT = 4
-INVISIBLE_CHAR = "\u3164"
+PANEL_TEXT = (
+    "✈️ *Painel de Controle*\n"
+    "🤖 *Automático:* buscas a cada 30 min\n"
+    "🖼️ *Manual:* print imediato\n\n"
+    "_Escolha uma opção:_"
+)
 
 AIRPORT_OPTIONS = [
     ("PVH", "Porto Velho"),
@@ -56,12 +61,6 @@ AIRPORT_OPTIONS = [
 AIRPORT_LABELS = {code: f"{code} — {name}" for code, name in AIRPORT_OPTIONS}
 
 
-def pad_invisible(text: str, count: int, right_count: int | None = None) -> str:
-    left = INVISIBLE_CHAR * max(0, count)
-    right = INVISIBLE_CHAR * max(0, right_count if right_count is not None else count)
-    return f"{left}{text}{right}"
-
-
 def load_env(path: Path) -> None:
     if not path.exists():
         return
@@ -91,6 +90,16 @@ def normalize_date(raw: str) -> str:
         except ValueError:
             continue
     raise ValueError('Formato inválido, use DD/MM/AAAA, DD-MM-AAAA, YYYY/MM/DD ou YYYY-MM-DD')
+
+
+def format_date_br(raw: str) -> str:
+    raw = (raw or "").strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return raw
 
 
 def ensure_bot_tables() -> None:
@@ -227,15 +236,15 @@ def start_markup() -> InlineKeyboardMarkup:
 
 def main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(pad_invisible('✈️ Abrir Menu Principal do VooBot', 5), callback_data='menu:back')],
+        [InlineKeyboardButton('⬅️ Voltar ao menu', callback_data='menu:back')],
     ])
 
 def full_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('Remover rota', callback_data='menu:removerrota')],
-        [InlineKeyboardButton('Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('Ajustar limite', callback_data='menu:limite')],
-        [InlineKeyboardButton('Fontes'  , callback_data='menu:fontes'), InlineKeyboardButton('PesquisarAgora', callback_data='menu:agora')],
-        [InlineKeyboardButton(pad_invisible('ℹ️ Ajuda e instruções', 8), callback_data='menu:manual')],
+        [InlineKeyboardButton('➕ Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('➖ Remover rota', callback_data='menu:removerrota')],
+        [InlineKeyboardButton('📋 Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('💰 Ajustar limite', callback_data='menu:limite')],
+        [InlineKeyboardButton('🔎 Fontes', callback_data='menu:fontes'), InlineKeyboardButton('🖼️ Consulta manual', callback_data='menu:agora')],
+        [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
     ])
 
 
@@ -340,7 +349,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text('✅ Cadastro confirmado com sucesso!')
     await query.message.reply_text(
-        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
+        PANEL_TEXT,
         parse_mode='Markdown',
         reply_markup=main_menu_markup(),
     )
@@ -356,7 +365,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
+        PANEL_TEXT,
         parse_mode='Markdown',
         reply_markup=full_menu_markup(),
     )
@@ -411,7 +420,7 @@ async def minhas_rotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         route_line = (
             f"{AIRPORT_LABELS.get(row['origin'], row['origin'])} → "
-            f"{AIRPORT_LABELS.get(row['destination'], row['destination'])} | {row['outbound_date']}"
+            f"{AIRPORT_LABELS.get(row['destination'], row['destination'])} | {format_date_br(row['outbound_date'])}"
         )
         linhas.append(
             f"🛫 {route_line}\n"
@@ -552,8 +561,8 @@ async def _save_route_with_inbound(update: Update, context: ContextTypes.DEFAULT
     conn.close()
 
     await msg_target.reply_text(
-        f"✅ *Rota cadastrada*\n{AIRPORT_LABELS.get(context.user_data['origin'], context.user_data['origin'])} → {AIRPORT_LABELS.get(context.user_data['destination'], context.user_data['destination'])} | {context.user_data['outbound_date']}" +
-        (f" | {inbound_date}" if inbound_date else ''),
+        f"✅ *Rota cadastrada*\n{AIRPORT_LABELS.get(context.user_data['origin'], context.user_data['origin'])} → {AIRPORT_LABELS.get(context.user_data['destination'], context.user_data['destination'])} | {format_date_br(context.user_data['outbound_date'])}" +
+        (f" | {format_date_br(inbound_date)}" if inbound_date else ''),
         parse_mode='Markdown',
         reply_markup=main_menu_markup(),
     )
@@ -568,14 +577,17 @@ async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == 'origem':
         context.user_data['origin'] = code
-        await query.edit_message_text(f"Origem escolhida: {AIRPORT_LABELS.get(code, code)}")
-        await query.message.reply_text('Escolha o destino:', reply_markup=airport_keyboard('destino'))
+        await query.edit_message_text(
+            f"✅ Origem: {AIRPORT_LABELS.get(code, code)}\n\nEscolha o destino:",
+            reply_markup=airport_keyboard('destino'),
+        )
         return ASK_DESTINATION
 
     if action == 'destino':
         context.user_data['destination'] = code
-        await query.edit_message_text(f"Destino escolhido: {AIRPORT_LABELS.get(code, code)}")
-        await query.message.reply_text('Data de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD')
+        await query.edit_message_text(
+            f"✅ Destino: {AIRPORT_LABELS.get(code, code)}\n\nData de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD"
+        )
         return ASK_OUTBOUND
 
 
@@ -610,9 +622,9 @@ async def removerrota(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = []
     for row in rows:
-        label = f"{row['origin']}→{row['destination']} | {row['outbound_date']}"
+        label = f"{row['origin']}→{row['destination']} | {format_date_br(row['outbound_date'])}"
         if row['inbound_date']:
-            label += f" | {row['inbound_date']}"
+            label += f" | {format_date_br(row['inbound_date'])}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"removerrota:{row['id']}")])
 
     await update.message.reply_text(
@@ -648,17 +660,17 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         conn.commit()
         conn.close()
 
-        texto = f"Rota removida com sucesso: {row['origin']}→{row['destination']} | {row['outbound_date']}"
+        texto = f"Rota removida com sucesso: {row['origin']}→{row['destination']} | {format_date_br(row['outbound_date'])}"
         if row['inbound_date']:
-            texto += f" | {row['inbound_date']}"
+            texto += f" | {format_date_br(row['inbound_date'])}"
         await query.edit_message_text('🗑️ ' + texto)
-        await query.message.reply_text('✈️ *Painel de Controle*', parse_mode='Markdown', reply_markup=main_menu_markup())
+        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
         return
         
     elif route_id_str.startswith('cancel_'):
         conn.close()
         await query.edit_message_text('❌ Remoção cancelada.')
-        await query.message.reply_text('✈️ *Painel de Controle*', parse_mode='Markdown', reply_markup=main_menu_markup())
+        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
         return
 
     route_id = int(route_id_str)
@@ -679,9 +691,9 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text('Rota não encontrada ou já removida.')
         return
 
-    texto = f"{row['origin']}→{row['destination']} | {row['outbound_date']}"
+    texto = f"{row['origin']}→{row['destination']} | {format_date_br(row['outbound_date'])}"
     if row['inbound_date']:
-        texto += f" | {row['inbound_date']}"
+        texto += f" | {format_date_br(row['inbound_date'])}"
         
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton('⚠️ Sim, quero remover', callback_data=f"removerrota:confirm_{route_id}")],
@@ -803,7 +815,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fake_update = Update(update.update_id, message=query.message)
         await manual(fake_update, context)
     elif action == 'back':
-        await query.message.reply_text('✈️ *-Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_', parse_mode='Markdown', reply_markup=full_menu_markup())
+        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=full_menu_markup())
 
     return ConversationHandler.END
 

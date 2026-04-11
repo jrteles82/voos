@@ -22,6 +22,7 @@ DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
 OWNER_TELEGRAM_ID = "1748352987"
 MAX_ROUTES_DEFAULT = 4
+INVISIBLE_CHAR = "\u3164"
 
 AIRPORT_OPTIONS = [
     ("PVH", "Porto Velho"),
@@ -53,6 +54,12 @@ AIRPORT_OPTIONS = [
     ("PMW", "Palmas"),
 ]
 AIRPORT_LABELS = {code: f"{code} — {name}" for code, name in AIRPORT_OPTIONS}
+
+
+def pad_invisible(text: str, count: int, right_count: int | None = None) -> str:
+    left = INVISIBLE_CHAR * max(0, count)
+    right = INVISIBLE_CHAR * max(0, right_count if right_count is not None else count)
+    return f"{left}{text}{right}"
 
 
 def load_env(path: Path) -> None:
@@ -220,7 +227,7 @@ def start_markup() -> InlineKeyboardMarkup:
 
 def main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('✈️ Abrir Menu Principal do VooBot', callback_data='menu:back')],
+        [InlineKeyboardButton(pad_invisible('✈️ Abrir Menu Principal do VooBot', 5), callback_data='menu:back')],
     ])
 
 def full_menu_markup() -> InlineKeyboardMarkup:
@@ -228,7 +235,7 @@ def full_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton('Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('Remover rota', callback_data='menu:removerrota')],
         [InlineKeyboardButton('Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('Ajustar limite', callback_data='menu:limite')],
         [InlineKeyboardButton('Fontes'  , callback_data='menu:fontes'), InlineKeyboardButton('PesquisarAgora', callback_data='menu:agora')],
-        [InlineKeyboardButton('------------------    ℹ️ Ajuda e instruções    -------------------', callback_data='menu:manual')],
+        [InlineKeyboardButton(pad_invisible('ℹ️ Ajuda e instruções', 8), callback_data='menu:manual')],
     ])
 
 
@@ -796,7 +803,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fake_update = Update(update.update_id, message=query.message)
         await manual(fake_update, context)
     elif action == 'back':
-        await query.message.reply_text('✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_', parse_mode='Markdown', reply_markup=full_menu_markup())
+        await query.message.reply_text('✈️ *-Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_', parse_mode='Markdown', reply_markup=full_menu_markup())
 
     return ConversationHandler.END
 

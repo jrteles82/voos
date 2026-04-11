@@ -402,9 +402,12 @@ async def minhas_rotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     linhas = [f'💰 *Limite de alerta:* R$ {limite:.2f}', '']
     for row in rows:
+        route_line = (
+            f"{AIRPORT_LABELS.get(row['origin'], row['origin'])} → "
+            f"{AIRPORT_LABELS.get(row['destination'], row['destination'])} | {row['outbound_date']}"
+        )
         linhas.append(
-            f"🛫 {AIRPORT_LABELS.get(row['origin'], row['origin'])} → {AIRPORT_LABELS.get(row['destination'], row['destination'])}\n"
-            f"📅 {row['outbound_date']}\n"
+            f"🛫 {route_line}\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
 

@@ -2,7 +2,7 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ForceReply
 from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 from telegram.ext import (
     ApplicationBuilder,
@@ -102,6 +102,10 @@ def format_date_br(raw: str) -> str:
         except ValueError:
             continue
     return raw
+
+
+def format_money_br(value: float) -> str:
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def ensure_bot_tables() -> None:
@@ -241,6 +245,15 @@ def main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton('⬅️ Voltar ao menu', callback_data='menu:back')],
     ])
 
+
+def cancel_markup(callback_data: str, label: str = '❌ Cancelar') -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=callback_data)]])
+
+
+def force_reply_markup(placeholder: str) -> ForceReply:
+    return ForceReply(selective=False, input_field_placeholder=placeholder)
+
+
 def full_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('➕ Adicionar nova rota', callback_data='menu:addrota')],
@@ -263,6 +276,7 @@ def airport_keyboard(prefix: str) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+    buttons.append([InlineKeyboardButton('❌ Cancelar cadastro de rota', callback_data='addrota:cancel')])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -274,6 +288,17 @@ def sources_menu_markup(enable_google: bool, enable_maxmilhas: bool) -> InlineKe
         [InlineKeyboardButton(max_label, callback_data='sources:toggle_maxmilhas')],
         [InlineKeyboardButton('⬅️ Voltar ao menu', callback_data='menu:back')],
     ])
+
+
+def removerrota_list_markup(rows) -> InlineKeyboardMarkup:
+    keyboard = []
+    for row in rows:
+        label = f"{row['origin']}→{row['destination']} | {format_date_br(row['outbound_date'])}"
+        if row['inbound_date']:
+            label += f" | {format_date_br(row['inbound_date'])}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"removerrota:{row['id']}")])
+    keyboard.append([InlineKeyboardButton('❌ Cancelar remoção', callback_data='removerrota:cancel_list')])
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -417,22 +442,35 @@ async def minhas_rotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     limite = setting['max_price'] if setting else 1200
+    limite_txt = format_money_br(float(limite))
     if not rows:
-        await update.message.reply_text(f'📋 Você ainda não tem rotas ativas cadastradas.\n💰 Limite atual: R$ {limite:.2f}')
+        await update.message.reply_text(
+            f'📋 *Você ainda não tem rotas ativas.*\n'
+            f'💰 Limite atual: *R$ {limite_txt}*',
+            parse_mode='Markdown',
+            reply_markup=main_menu_markup(),
+        )
         return
 
-    linhas = [f'💰 *Limite de alerta:* R$ {limite:.2f}', '']
-    for row in rows:
-        route_line = (
-            f"{AIRPORT_LABELS.get(row['origin'], row['origin'])} → "
-            f"{AIRPORT_LABELS.get(row['destination'], row['destination'])} | {format_date_br(row['outbound_date'])}"
-        )
-        linhas.append(
-            f"🛫 {route_line}\n"
-            f"━━━━━━━━━━━━━━━━━━"
-        )
+    linhas = [
+        '📋 *Suas Rotas Ativas*',
+        '══════════════════════',
+        f'💰 *Limite de alerta:* R$ {limite_txt}',
+        f'🧭 *Total de rotas:* {len(rows)}',
+        '',
+    ]
+    for idx, row in enumerate(rows, start=1):
+        origem = AIRPORT_LABELS.get(row['origin'], row['origin'])
+        destino = AIRPORT_LABELS.get(row['destination'], row['destination'])
+        linhas.append(f'*Rota {idx}*')
+        linhas.append(f'🛫 {origem} → {destino}')
+        linhas.append(f'📅 Ida: {format_date_br(row["outbound_date"])}')
+        if row['inbound_date']:
+            linhas.append(f'📅 Volta: {format_date_br(row["inbound_date"])}')
+        if idx != len(rows):
+            linhas.append('')
 
-    await update.message.reply_text('📋 *SUAS ROTAS ATIVAS*\n\n' + '\n'.join(linhas), parse_mode='Markdown', reply_markup=main_menu_markup())
+    await update.message.reply_text('\n'.join(linhas), parse_mode='Markdown', reply_markup=main_menu_markup())
 
 
 async def fontes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -575,12 +613,21 @@ async def _save_route_with_inbound(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
-async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def addrota_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    context.user_data.clear()
+    await query.edit_message_text('❌ Cadastro de rota cancelado.')
+    await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+    return ConversationHandler.END
+
+
+async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     action, code = query.data.split(':', 1)
 
     if action == 'origem':
+        await query.answer('Agora selecione o destino para continuar.', show_alert=True)
         context.user_data['origin'] = code
         await query.edit_message_text(
             f"✅ Origem: {AIRPORT_LABELS.get(code, code)}\n\nEscolha o destino:",
@@ -589,9 +636,15 @@ async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ASK_DESTINATION
 
     if action == 'destino':
+        await query.answer('Digite a data de ida no chat para finalizar.', show_alert=True)
         context.user_data['destination'] = code
         await query.edit_message_text(
-            f"✅ Destino: {AIRPORT_LABELS.get(code, code)}\n\nData de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD"
+            f"✅ Destino: {AIRPORT_LABELS.get(code, code)}\n\nData de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD",
+            reply_markup=cancel_markup('addrota:cancel', '❌ Cancelar cadastro de rota'),
+        )
+        await query.message.reply_text(
+            '📅 Responda esta mensagem com a data de ida (DD/MM/AAAA).\nPara cancelar: /cancelar',
+            reply_markup=force_reply_markup('Ex.: 25/12/2026'),
         )
         return ASK_OUTBOUND
 
@@ -625,16 +678,9 @@ async def removerrota(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('🗑️ Você não tem rotas ativas para remover.', reply_markup=main_menu_markup())
         return
 
-    keyboard = []
-    for row in rows:
-        label = f"{row['origin']}→{row['destination']} | {format_date_br(row['outbound_date'])}"
-        if row['inbound_date']:
-            label += f" | {format_date_br(row['inbound_date'])}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"removerrota:{row['id']}")])
-
     await update.message.reply_text(
         '🗑️ Escolha a rota que deseja remover:',
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=removerrota_list_markup(rows),
     )
 
 
@@ -646,6 +692,12 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     conn = get_db()
     user_id = get_user_id_by_chat(conn, chat_id)
+
+    if route_id_str == 'cancel_list':
+        conn.close()
+        await query.edit_message_text('❌ Remoção cancelada.')
+        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+        return
     
     if route_id_str.startswith('confirm_'):
         route_id = int(route_id_str.split('_')[1])
@@ -669,7 +721,29 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if row['inbound_date']:
             texto += f" | {format_date_br(row['inbound_date'])}"
         await query.edit_message_text('🗑️ ' + texto)
-        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+        conn2 = get_db()
+        remaining_rows = conn2.execute(
+            '''
+            SELECT id, origin, destination, outbound_date, inbound_date
+            FROM user_routes
+            WHERE user_id = ? AND active = 1
+            ORDER BY outbound_date, origin, destination
+            LIMIT 20
+            ''',
+            (user_id,),
+        ).fetchall()
+        conn2.close()
+
+        if remaining_rows:
+            await query.message.reply_text(
+                '🗑️ Escolha a próxima rota que deseja remover:',
+                reply_markup=removerrota_list_markup(remaining_rows),
+            )
+        else:
+            await query.message.reply_text(
+                '✅ Não há mais rotas ativas para remover.',
+                reply_markup=main_menu_markup(),
+            )
         return
         
     elif route_id_str.startswith('cancel_'):
@@ -748,8 +822,24 @@ async def limite_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     conn.close()
-    await update.message.reply_text('Qual o novo limite máximo? Exemplo: 1200 ou 1200,50')
+    await update.message.reply_text(
+        'Qual o novo limite máximo? Exemplo: 1200 ou 1200,50',
+        reply_markup=cancel_markup('limite:cancel', '❌ Cancelar ajuste de limite'),
+    )
+    await update.message.reply_text(
+        '💰 Responda esta mensagem com o novo limite.\nPara cancelar: /cancelar',
+        reply_markup=force_reply_markup('Ex.: 1200,50'),
+    )
     return ASK_LIMIT
+
+
+async def limite_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    await query.edit_message_text('❌ Ajuste de limite cancelado.')
+    await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+    return ConversationHandler.END
 
 
 async def limite_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -787,7 +877,6 @@ async def limite_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     action = query.data.split(':', 1)[1]
     chat_id = str(query.message.chat.id)
 
@@ -795,31 +884,47 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = require_confirmation(conn, chat_id) if action != 'manual' else None
     conn.close()
     if msg:
+        await query.answer('Confirme seu cadastro para continuar.', show_alert=True)
         await query.message.reply_text(msg, reply_markup=start_markup())
         return ConversationHandler.END
 
     if action == 'addrota':
+        await query.answer('Selecione a origem da rota.', show_alert=True)
         await query.message.reply_text('Escolha a origem:', reply_markup=airport_keyboard('origem'))
         return ASK_ORIGIN
     if action == 'minhasrotas':
+        await query.answer('Carregando suas rotas...')
         fake_update = Update(update.update_id, message=query.message)
         await minhas_rotas(fake_update, context)
     elif action == 'removerrota':
+        await query.answer('Selecione a rota que deseja remover.', show_alert=True)
         fake_update = Update(update.update_id, message=query.message)
         await removerrota(fake_update, context)
     elif action == 'limite':
-        await query.message.reply_text('Qual o novo limite máximo? Exemplo: 1200 ou 1200,50')
+        await query.answer('Digite o novo limite no chat.', show_alert=True)
+        await query.message.reply_text(
+            'Qual o novo limite máximo? Exemplo: 1200 ou 1200,50',
+            reply_markup=cancel_markup('limite:cancel', '❌ Cancelar ajuste de limite'),
+        )
+        await query.message.reply_text(
+            '💰 Responda esta mensagem com o novo limite.\nPara cancelar: /cancelar',
+            reply_markup=force_reply_markup('Ex.: 1200,50'),
+        )
         return ASK_LIMIT
     elif action == 'fontes':
+        await query.answer('Abrindo fontes de consulta...')
         fake_update = Update(update.update_id, message=query.message)
         await fontes(fake_update, context)
     elif action == 'agora':
+        await query.answer('Consulta manual iniciada...')
         fake_update = Update(update.update_id, message=query.message)
         await agora(fake_update, context)
     elif action == 'manual':
+        await query.answer('Abrindo instruções...')
         fake_update = Update(update.update_id, message=query.message)
         await manual(fake_update, context)
     elif action == 'back':
+        await query.answer('Voltando ao menu...')
         await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=full_menu_markup())
 
     return ConversationHandler.END
@@ -862,17 +967,32 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler('addrota', addrota_start), CallbackQueryHandler(menu_callback, pattern=r'^menu:addrota$')],
         states={
-            ASK_ORIGIN: [CallbackQueryHandler(aeroporto_callback, pattern=r'^(origem|destino):')],
-            ASK_DESTINATION: [CallbackQueryHandler(aeroporto_callback, pattern=r'^(origem|destino):')],
-            ASK_OUTBOUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, addrota_outbound)],
-            ASK_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, limite_save)],
+            ASK_ORIGIN: [
+                CallbackQueryHandler(addrota_cancel_callback, pattern=r'^addrota:cancel$'),
+                CallbackQueryHandler(aeroporto_callback, pattern=r'^(origem|destino):'),
+            ],
+            ASK_DESTINATION: [
+                CallbackQueryHandler(addrota_cancel_callback, pattern=r'^addrota:cancel$'),
+                CallbackQueryHandler(aeroporto_callback, pattern=r'^(origem|destino):'),
+            ],
+            ASK_OUTBOUND: [
+                CallbackQueryHandler(addrota_cancel_callback, pattern=r'^addrota:cancel$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, addrota_outbound),
+            ],
+            ASK_LIMIT: [
+                CallbackQueryHandler(limite_cancel_callback, pattern=r'^limite:cancel$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, limite_save),
+            ],
         },
         fallbacks=[CommandHandler('cancelar', cancel)],
     )
     limite_conv = ConversationHandler(
         entry_points=[CommandHandler('limite', limite_start), CallbackQueryHandler(menu_callback, pattern=r'^menu:limite$')],
         states={
-            ASK_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, limite_save)],
+            ASK_LIMIT: [
+                CallbackQueryHandler(limite_cancel_callback, pattern=r'^limite:cancel$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, limite_save),
+            ],
         },
         fallbacks=[CommandHandler('cancelar', cancel)],
     )

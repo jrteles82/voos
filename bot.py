@@ -225,10 +225,10 @@ def main_menu_markup() -> InlineKeyboardMarkup:
 
 def full_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('➕ Adicionar', callback_data='menu:addrota'), InlineKeyboardButton('🗑️ Remover', callback_data='menu:removerrota')],
-        [InlineKeyboardButton('📋 Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('💰 Ajustar limite', callback_data='menu:limite')],
-        [InlineKeyboardButton('🔎 Fontes', callback_data='menu:fontes'), InlineKeyboardButton('🖼️ Agora', callback_data='menu:agora')],
-        [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
+        [InlineKeyboardButton('Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('Remover rota', callback_data='menu:removerrota')],
+        [InlineKeyboardButton('Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('Ajustar limite', callback_data='menu:limite')],
+        [InlineKeyboardButton('Fontes'  , callback_data='menu:fontes'), InlineKeyboardButton('PesquisarAgora', callback_data='menu:agora')],
+        [InlineKeyboardButton('------------------    ℹ️ Ajuda e instruções    -------------------', callback_data='menu:manual')],
     ])
 
 

@@ -22,8 +22,10 @@ DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
 OWNER_TELEGRAM_ID = "1748352987"
 MAX_ROUTES_DEFAULT = 4
+PANEL_DIVIDER = "──────────────────────────"
 PANEL_TEXT = (
     "✈️ *Painel de Controle*\n"
+    f"{PANEL_DIVIDER}\n"
     "🤖 *Automático:* buscas a cada 30 min\n"
     "🖼️ *Manual:* print imediato\n\n"
     "_Escolha uma opção:_"
@@ -241,9 +243,12 @@ def main_menu_markup() -> InlineKeyboardMarkup:
 
 def full_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('➕ Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('➖ Remover rota', callback_data='menu:removerrota')],
-        [InlineKeyboardButton('📋 Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('💰 Ajustar limite', callback_data='menu:limite')],
-        [InlineKeyboardButton('🔎 Fontes', callback_data='menu:fontes'), InlineKeyboardButton('🖼️ Consulta manual', callback_data='menu:agora')],
+        [InlineKeyboardButton('➕ Adicionar nova rota', callback_data='menu:addrota')],
+        [InlineKeyboardButton('➖ Remover rota cadastrada', callback_data='menu:removerrota')],
+        [InlineKeyboardButton('📋 Ver minhas rotas ativas', callback_data='menu:minhasrotas')],
+        [InlineKeyboardButton('💰 Ajustar limite de preço', callback_data='menu:limite')],
+        [InlineKeyboardButton('🔎 Configurar fontes de busca', callback_data='menu:fontes')],
+        [InlineKeyboardButton('🖼️ Gerar consulta manual agora', callback_data='menu:agora')],
         [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
     ])
 

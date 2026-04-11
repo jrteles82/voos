@@ -66,8 +66,9 @@ PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
 _scan_lock = threading.Lock()
 _scan_last_run_at = None
 _user_scheduler_started = False
-SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "1.35"))
-SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.10")))
+SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "4.0"))
+SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.25")))
+SCAN_IMAGE_TARGET_WIDTH = max(720, int(os.getenv("SCAN_IMAGE_TARGET_WIDTH", "1280")))
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
@@ -829,6 +830,11 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
 
         if group_idx != len(groups) - 1:
             y += scaled(8)
+    if image.width < SCAN_IMAGE_TARGET_WIDTH:
+        target_h = int(round(image.height * (SCAN_IMAGE_TARGET_WIDTH / image.width)))
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        image = image.resize((SCAN_IMAGE_TARGET_WIDTH, max(1, target_h)), resample=resample)
+
     tmp = NamedTemporaryFile(prefix="telegram_scan_", suffix=".png", delete=False)
     tmp.close()
     image.save(tmp.name, format="PNG")

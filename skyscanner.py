@@ -206,6 +206,23 @@ class Database:
     def save(self, result: FlightResult, price_band: str) -> None:
         self.conn.execute(
             """
+            DELETE FROM results
+            WHERE site = ?
+              AND origin = ?
+              AND destination = ?
+              AND outbound_date = ?
+              AND COALESCE(inbound_date, '') = COALESCE(?, '')
+            """,
+            (
+                result.site,
+                result.origin,
+                result.destination,
+                result.outbound_date,
+                result.inbound_date,
+            ),
+        )
+        self.conn.execute(
+            """
             INSERT INTO results (
                 created_at, site, origin, destination, outbound_date, inbound_date,
                 price, currency, url, notes, price_band,

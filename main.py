@@ -388,7 +388,7 @@ def _split_routes(routes: list[RouteQuery], chunks: int) -> list[list[RouteQuery
     return [routes[i * chunk_size:(i + 1) * chunk_size] for i in range(chunks)]
 
 
-def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
+def run_scan_for_routes(routes: list[RouteQuery], on_row=None, sources: dict | None = None):
     if not routes:
         return []
 
@@ -406,6 +406,8 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
     route_chunks = _split_routes(routes, worker_count)
     chunk_results: list[list[tuple[RouteQuery, FlightResult]] | None] = [None] * len(route_chunks)
 
+    source_flags = sources or {"google_flights": True, "maxmilhas": True}
+
     def _scan_chunk(chunk_idx: int, chunk_routes: list[RouteQuery]) -> list[tuple[RouteQuery, FlightResult]]:
         if not chunk_routes:
             return []
@@ -422,11 +424,13 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None):
             scraper = GoogleFlightsScraper(browser)
             try:
                 for route in chunk_routes:
-                    google_result = _search_google_result(scraper, route)
-                    worker_results.append((route, google_result))
-                    maxmilhas_result = _search_maxmilhas_result(p, route)
-                    if maxmilhas_result is not None:
-                        worker_results.append((route, maxmilhas_result))
+                    if source_flags.get("google_flights", True):
+                        google_result = _search_google_result(scraper, route)
+                        worker_results.append((route, google_result))
+                    if source_flags.get("maxmilhas", True):
+                        maxmilhas_result = _search_maxmilhas_result(p, route)
+                        if maxmilhas_result is not None:
+                            worker_results.append((route, maxmilhas_result))
             finally:
                 browser.close()
         return worker_results

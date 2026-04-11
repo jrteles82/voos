@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / '.env'
 DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 INTERVAL_SECONDS = 180
+SEND_COOLDOWN_SECONDS = 170
 
 
 def load_env(path: Path) -> None:
@@ -52,42 +53,46 @@ def iter_users(conn):
     ).fetchall()
 
 
-def was_sent_recently(last_sent_at: str, window_seconds: int = 600) -> bool:
+def was_sent_recently(last_sent_at: str, window_seconds: int = SEND_COOLDOWN_SECONDS) -> bool:
     if not last_sent_at:
         return False
     try:
         dt = datetime.fromisoformat(last_sent_at.replace(' ', 'T'))
     except ValueError:
         return False
-    return (datetime.now() - dt).total_seconds() < window_seconds
+    delta_seconds = (datetime.now() - dt).total_seconds()
+    if delta_seconds < -60:
+        return False
+    return delta_seconds < window_seconds
 
 
 def mark_sent(conn, user_id: int):
+    now_txt = datetime.now().isoformat(sep=' ', timespec='seconds')
     conn.execute(
-        "UPDATE bot_settings SET last_sent_at = datetime('now'), updated_at = datetime('now') WHERE user_id = ?",
-        (user_id,),
+        "UPDATE bot_settings SET last_sent_at = ?, updated_at = ? WHERE user_id = ?",
+        (now_txt, now_txt, user_id),
     )
     conn.commit()
 
 
-def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, sources: dict):
+def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, sources: dict) -> tuple[bool, str]:
     routes = _build_user_routes(conn, user_id)
     if not routes:
-        return False
+        return False, 'sem_rotas_ativas'
 
     parsed = run_scan_for_routes(routes, sources=sources)
     filtered = filter_rows_by_max_price(parsed, max_price)
     if not filtered:
-        return False
+        return False, 'sem_resultado_no_limite'
 
     image_path = build_scan_results_image(filtered)
     if not image_path:
-        return False
+        return False, 'sem_imagem'
 
     try:
         with open(image_path, 'rb') as image_file:
             asyncio.run(bot.send_photo(chat_id=chat_id, photo=image_file))
-        return True
+        return True, 'enviado'
     finally:
         try:
             os.remove(image_path)
@@ -113,8 +118,12 @@ def main():
             for user in users:
                 try:
                     if was_sent_recently(str(user['last_sent_at'])):
+                        print(
+                            f"[bot-scheduler] user {user['user_id']} ignorado: cooldown ativo "
+                            f"(last_sent_at={user['last_sent_at']})"
+                        )
                         continue
-                    sent = run_for_user(
+                    sent, reason = run_for_user(
                         conn,
                         bot,
                         int(user['user_id']),
@@ -127,6 +136,9 @@ def main():
                     )
                     if sent:
                         mark_sent(conn, int(user['user_id']))
+                        print(f"[bot-scheduler] user {user['user_id']} envio concluído")
+                    else:
+                        print(f"[bot-scheduler] user {user['user_id']} sem envio: {reason}")
                 except Exception as exc:
                     print(f'[bot-scheduler] erro no user {user["user_id"]}: {exc}')
         finally:

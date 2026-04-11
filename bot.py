@@ -220,14 +220,14 @@ def start_markup() -> InlineKeyboardMarkup:
 
 def main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('✈️ Abrir Menu Principal', callback_data='menu:back')],
+        [InlineKeyboardButton('✈️ Abrir Menu Principal do VooBot', callback_data='menu:back')],
     ])
 
 def full_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('➕ Adicionar rota', callback_data='menu:addrota'), InlineKeyboardButton('🗑️ Remover rota', callback_data='menu:removerrota')],
-        [InlineKeyboardButton('📋 Ver minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('💰 Ajustar limite', callback_data='menu:limite')],
-        [InlineKeyboardButton('🔎 Fontes de busca', callback_data='menu:fontes'), InlineKeyboardButton('🖼️ Consultar agora', callback_data='menu:agora')],
+        [InlineKeyboardButton('➕ Adicionar', callback_data='menu:addrota'), InlineKeyboardButton('🗑️ Remover', callback_data='menu:removerrota')],
+        [InlineKeyboardButton('📋 Minhas rotas', callback_data='menu:minhasrotas'), InlineKeyboardButton('💰 Ajustar limite', callback_data='menu:limite')],
+        [InlineKeyboardButton('🔎 Fontes', callback_data='menu:fontes'), InlineKeyboardButton('🖼️ Agora', callback_data='menu:agora')],
         [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
     ])
 
@@ -333,7 +333,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text('✅ Cadastro confirmado com sucesso!')
     await query.message.reply_text(
-        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
+        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
         parse_mode='Markdown',
         reply_markup=main_menu_markup(),
     )
@@ -349,7 +349,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
+        '✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_',
         parse_mode='Markdown',
         reply_markup=full_menu_markup(),
     )
@@ -796,7 +796,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fake_update = Update(update.update_id, message=query.message)
         await manual(fake_update, context)
     elif action == 'back':
-        await query.message.reply_text('✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_', parse_mode='Markdown', reply_markup=full_menu_markup())
+        await query.message.reply_text('✈️ *Painel de Controle — VooBot*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🤖 *Automático:* Buscas de 30 em 30 min.\n🖼️ *Manual:* Print imediato na hora.\n\n_Escolha uma opção abaixo para gerenciar:_', parse_mode='Markdown', reply_markup=full_menu_markup())
 
     return ConversationHandler.END
 

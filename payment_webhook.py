@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request
 from telegram import Bot
 
-from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN
+from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN, MERCADOPAGO_API_BASE_URL
 
 PORT = int(os.getenv('PAYMENT_WEBHOOK_PORT', '8787'))
 app = Flask(__name__)
@@ -24,7 +24,7 @@ def get_mp_payment(payment_id: str) -> dict:
         'Authorization': f'Bearer {MP_ACCESS_TOKEN}',
         'Content-Type': 'application/json',
     }
-    response = requests.get(f'https://api.mercadopago.com/v1/payments/{payment_id}', headers=headers, timeout=30)
+    response = requests.get(f'{MERCADOPAGO_API_BASE_URL}/v1/payments/{payment_id}', headers=headers, timeout=30)
     data = response.json()
     if response.status_code >= 400:
         raise RuntimeError(data.get('message') or 'Erro ao consultar pagamento Pix')

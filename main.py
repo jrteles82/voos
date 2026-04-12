@@ -51,10 +51,24 @@ from maxmilhas import (
     buscar_menor_preco as buscar_menor_preco_maxmilhas,
     filtrar_precos_parcelados,
 )
+from config import load_env
+
+load_env()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SKYSCANNER_SECRET_KEY", "dev-change-this-secret")
-TELEGRAM_API_BASE_URL = os.getenv("TELEGRAM_API_BASE_URL", "").strip().rstrip("/")
+
+
+def _env_required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Variável obrigatória ausente no .env: {name}")
+    return value
+
+
+TELEGRAM_API_BASE_URL = _env_required("TELEGRAM_API_BASE_URL").rstrip("/")
+BOOTSTRAP_CSS_URL = _env_required("BOOTSTRAP_CSS_URL")
+BOOTSTRAP_ICONS_CSS_URL = _env_required("BOOTSTRAP_ICONS_CSS_URL")
 
 
 DEFAULT_SCAN_INTERVAL = int(CONFIG.get("full_scan_seconds", 3 * 60 * 60))
@@ -669,7 +683,7 @@ def send_telegram_message_to(text: str, token: str | None = None, chat_id: str |
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id:
         return
-    base_url = TELEGRAM_API_BASE_URL or "https://api.telegram.org"
+    base_url = TELEGRAM_API_BASE_URL
     url = f"{base_url}/bot{token}/sendMessage"
     requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=20).raise_for_status()
 
@@ -850,7 +864,7 @@ def send_telegram_photo_to(image_path: str, caption: str | None = None, token: s
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id or not image_path or not os.path.exists(image_path):
         return
-    base_url = TELEGRAM_API_BASE_URL or "https://api.telegram.org"
+    base_url = TELEGRAM_API_BASE_URL
     url = f"{base_url}/bot{token}/sendPhoto"
     with open(image_path, "rb") as image_file:
         requests.post(
@@ -1045,7 +1059,9 @@ def index():
 
 @app.route("/app", methods=["GET"])
 def app_front():
-    return app.send_static_file("index.html")
+    static_path = Path(app.static_folder or "static") / "index.html"
+    html = static_path.read_text(encoding="utf-8")
+    return render_template_string(html, bootstrap_css_url=BOOTSTRAP_CSS_URL)
 
 
 @app.route("/health", methods=["GET"])
@@ -1305,7 +1321,7 @@ def app_page():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>App Consultas</title>
-          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
         </head>
         <body class='bg-light'>
           <nav class='navbar navbar-dark bg-dark'>
@@ -1319,7 +1335,8 @@ def app_page():
           </div>
         </body>
         </html>
-        """
+        """,
+        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 def auth_db_path() -> str:
@@ -1512,7 +1529,7 @@ def auth_register():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Cadastro | VooBot Admin</title>
-          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
         </head>
         <body class='bg-light d-flex align-items-center' style='min-height:100vh;'>
           <div class='container'>
@@ -1537,6 +1554,7 @@ def auth_register():
         </html>
         """,
         error=error,
+        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 
@@ -1562,7 +1580,7 @@ def auth_login():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Login | VooBot Admin</title>
-          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
         </head>
         <body class='bg-light d-flex align-items-center' style='min-height:100vh;'>
           <div class='container'>
@@ -1587,6 +1605,7 @@ def auth_login():
         </html>
         """,
         error=error,
+        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 
@@ -1632,8 +1651,8 @@ def painel():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Painel Admin | VooBot</title>
-          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
-          <link href='https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css' rel='stylesheet'>
+          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
+          <link href='{{ bootstrap_icons_css_url }}' rel='stylesheet'>
           <style>
             body { background:#f4f6f9; }
             .sidebar { min-height: 100vh; background: #343a40; }
@@ -2064,6 +2083,8 @@ def painel():
         default_tg_chat=default_tg_chat,
         airport_options=AIRPORT_OPTIONS,
         restart_command_configured=bool(PANEL_RESTART_COMMAND),
+        bootstrap_css_url=BOOTSTRAP_CSS_URL,
+        bootstrap_icons_css_url=BOOTSTRAP_ICONS_CSS_URL,
     )
 
 

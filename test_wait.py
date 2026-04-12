@@ -1,12 +1,19 @@
 import sys
 import re
+import os
 from playwright.sync_api import sync_playwright
 import urllib.parse
 from skyscanner import GoogleFlightsScraper
 
 def test():
     q = "REC to PVH 2026-06-16 one way"
-    url = f"https://www.google.com/travel/flights?q={urllib.parse.quote(q)}&hl=pt-BR&gl=BR&curr=BRL"
+    base_url = os.getenv("GOOGLE_FLIGHTS_BASE_URL", "").strip()
+    hl = os.getenv("GOOGLE_HL", "pt-BR").strip()
+    gl = os.getenv("GOOGLE_GL", "BR").strip()
+    curr = os.getenv("GOOGLE_CURR", "BRL").strip()
+    if not base_url:
+        raise RuntimeError("Defina GOOGLE_FLIGHTS_BASE_URL no .env.")
+    url = f"{base_url}?q={urllib.parse.quote(q)}&hl={hl}&gl={gl}&curr={curr}"
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         ctx = b.new_context(locale="pt-BR", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")

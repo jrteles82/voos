@@ -5,6 +5,7 @@ import os
 import re
 import time
 import traceback
+from urllib.parse import urlparse
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -16,7 +17,8 @@ def _env_bool(name: str, default: bool) -> bool:
 ORIGEM = os.getenv("MAXMILHAS_ORIGEM", "PVH")
 DESTINO = os.getenv("MAXMILHAS_DESTINO", "FOR")
 DATA_IDA_ISO = os.getenv("MAXMILHAS_DATA_IDA_ISO", "2026-06-05")
-URL = os.getenv("MAXMILHAS_URL", "https://www.maxmilhas.com.br/passagens-aereas")
+URL = os.getenv("MAXMILHAS_URL", "").strip()
+MAXMILHAS_SEARCH_BASE_URL = os.getenv("MAXMILHAS_SEARCH_BASE_URL", "").strip().rstrip("/")
 
 HEADLESS = _env_bool("MAXMILHAS_HEADLESS", True)
 MAX_TENTATIVAS = int(os.getenv("MAXMILHAS_MAX_TENTATIVAS", "1"))
@@ -446,7 +448,14 @@ def pagina_tem_resultado(page, url_base: str = URL):
 
 
 def construir_url_busca(origem: str, destino: str, data_ida_iso: str):
-    return f"https://www.maxmilhas.com.br/busca-passagens-aereas/OW/{origem}/{destino}/{data_ida_iso}/1/0/0/EC"
+    if MAXMILHAS_SEARCH_BASE_URL:
+        base = MAXMILHAS_SEARCH_BASE_URL
+    else:
+        parsed = urlparse(URL)
+        if not parsed.scheme or not parsed.netloc:
+            raise RuntimeError("Defina MAXMILHAS_SEARCH_BASE_URL no .env com uma URL válida.")
+        base = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{base}/busca-passagens-aereas/OW/{origem}/{destino}/{data_ida_iso}/1/0/0/EC"
 
 
 def clicar_buscar(page, origem: str, destino: str, data_ida_iso: str, url_base: str = URL):

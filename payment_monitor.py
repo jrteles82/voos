@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import requests
 from telegram import Bot
 
-from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN
+from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN, MERCADOPAGO_API_BASE_URL
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("PAYMENT_MONITOR_CHECK_INTERVAL_SECONDS", "20"))
 MP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_MONITOR_MP_TIMEOUT_SECONDS", "30"))
@@ -25,7 +25,7 @@ def get_mp_payment(payment_id: str) -> dict:
         'Content-Type': 'application/json',
     }
     response = requests.get(
-        f'https://api.mercadopago.com/v1/payments/{payment_id}',
+        f'{MERCADOPAGO_API_BASE_URL}/v1/payments/{payment_id}',
         headers=headers,
         timeout=MP_REQUEST_TIMEOUT_SECONDS,
     )

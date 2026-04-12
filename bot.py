@@ -18,6 +18,7 @@ from config import (
     PANEL_TEXT,
     TOKEN,
     MP_ACCESS_TOKEN,
+    MERCADOPAGO_API_BASE_URL,
 )
 from access_policy import (
     ensure_policy_schema,
@@ -327,7 +328,7 @@ def create_mp_pix_payment(chat_id: str, plan_name: str, amount: float) -> dict:
             'email': f'admin{chat_id}@gmail.com'
         }
     }
-    response = requests.post('https://api.mercadopago.com/v1/payments', headers=headers, json=payload, timeout=30)
+    response = requests.post(f'{MERCADOPAGO_API_BASE_URL}/v1/payments', headers=headers, json=payload, timeout=30)
     data = response.json()
     if response.status_code >= 400:
         raise RuntimeError(data.get('message') or 'Erro ao gerar pagamento Pix')
@@ -352,7 +353,7 @@ def get_mp_payment(payment_id: str) -> dict:
         'Authorization': f'Bearer {MP_ACCESS_TOKEN}',
         'Content-Type': 'application/json',
     }
-    response = requests.get(f'https://api.mercadopago.com/v1/payments/{payment_id}', headers=headers, timeout=30)
+    response = requests.get(f'{MERCADOPAGO_API_BASE_URL}/v1/payments/{payment_id}', headers=headers, timeout=30)
     data = response.json()
     if response.status_code >= 400:
         raise RuntimeError(data.get('message') or 'Erro ao consultar pagamento Pix')

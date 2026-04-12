@@ -25,7 +25,6 @@ def main():
 
     py = str(BASE_DIR / '.venv' / 'bin' / 'python')
     children = [
-        [py, str(BASE_DIR / 'main.py')],
         [py, str(BASE_DIR / 'bot.py')],
         [py, str(BASE_DIR / 'bot_scheduler.py')],
         [py, str(BASE_DIR / 'job_worker.py')],

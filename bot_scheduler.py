@@ -104,7 +104,7 @@ def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, s
             conn.commit()
         return False, 'sem_resultado_no_limite'
 
-    image_path = build_scan_results_image(filtered)
+    image_path = build_scan_results_image(filtered, trigger='agendada')
     if not image_path:
         return False, 'sem_imagem'
 
@@ -136,12 +136,27 @@ def main():
         raise SystemExit('Defina TELEGRAM_BOT_TOKEN no .env')
 
     bot = Bot(token=TOKEN)
+    first_cycle = True
     while True:
         interval_seconds = max(60, max(1, _SCAN_INTERVAL_MINUTES) * 60)
         conn = get_db()
         try:
             ensure_policy_schema(conn)
             interval_seconds = get_scan_interval_seconds(conn)
+        finally:
+            conn.close()
+
+        if first_cycle:
+            first_cycle = False
+            print(
+                f"[bot-scheduler] iniciado em {now_local_iso(sep='T')}, "
+                f"aguardando primeiro slot de {interval_seconds}s"
+            )
+            sleep_until_next_slot(interval_seconds)
+
+        conn = get_db()
+        try:
+            ensure_policy_schema(conn)
             users = iter_users(conn)
             for user in users:
                 try:

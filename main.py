@@ -89,8 +89,10 @@ PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
 _scan_lock = threading.Lock()
 _scan_last_run_at = None
 SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "4.0"))
-SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.25")))
+SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.0")))
 SCAN_IMAGE_TARGET_WIDTH = max(720, int(os.getenv("SCAN_IMAGE_TARGET_WIDTH", "1280")))
+SCAN_IMAGE_TELEGRAM_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_TELEGRAM_MAX_ASPECT", "2.10"))
+SCHEDULER_SEND_COOLDOWN_SECONDS = int(os.getenv("SCHEDULER_SEND_COOLDOWN_SECONDS", "1700"))
 
 AIRPORT_OPTIONS = [
     ("PVH", "PVH — Porto Velho (RO)"),
@@ -626,6 +628,50 @@ def _user_has_running_scan(conn, user_id: int) -> bool:
     return bool(row)
 
 
+def _cleanup_stale_running_user_runs(conn, stale_minutes: int = 5) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, started_at
+        FROM user_runs
+        WHERE status = 'running'
+          AND trigger = 'agendada'
+        """
+    ).fetchall()
+    if not rows:
+        return 0
+    now_dt = now_local()
+    stale_ids: list[int] = []
+    for row in rows:
+        raw_started = (row["started_at"] or "").strip()
+        if not raw_started:
+            stale_ids.append(int(row["id"]))
+            continue
+        try:
+            started_dt = datetime.fromisoformat(raw_started.replace(" ", "T"))
+        except ValueError:
+            stale_ids.append(int(row["id"]))
+            continue
+        age_minutes = (now_dt - started_dt).total_seconds() / 60.0
+        if age_minutes >= stale_minutes:
+            stale_ids.append(int(row["id"]))
+
+    if not stale_ids:
+        return 0
+    placeholders = ",".join("?" for _ in stale_ids)
+    conn.execute(
+        f"""
+        UPDATE user_runs
+        SET status = 'error',
+            summary = 'encerrado automaticamente: execução travada',
+            finished_at = ?
+        WHERE id IN ({placeholders})
+        """,
+        (now_local_iso(sep="T"), *stale_ids),
+    )
+    conn.commit()
+    return len(stale_ids)
+
+
 def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True, send_text: bool = False):
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
@@ -672,6 +718,9 @@ def _auto_scan_loop():
             auth_conn = sqlite3.connect(auth_db_path())
             auth_conn.row_factory = sqlite3.Row
             try:
+                cleaned = _cleanup_stale_running_user_runs(auth_conn, stale_minutes=5)
+                if cleaned:
+                    print(f"[auto-scan] encerradas {cleaned} execuções travadas em user_runs")
                 user_rows = auth_conn.execute(
                     """
                     SELECT DISTINCT user_id
@@ -687,6 +736,14 @@ def _auto_scan_loop():
             sent_count = 0
             for user_id in user_ids:
                 try:
+                    check_conn = sqlite3.connect(auth_db_path())
+                    check_conn.row_factory = sqlite3.Row
+                    try:
+                        if _user_has_running_scan(check_conn, user_id):
+                            print(f"[auto-scan] usuário {user_id} já possui execução running; pulando")
+                            continue
+                    finally:
+                        check_conn.close()
                     result = run_user_scan(
                         user_id,
                         trigger="agendada",
@@ -821,6 +878,59 @@ def _scan_title_from_trigger(trigger: str | None) -> str:
     return "Consulta manual completa"
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _was_sent_recently(last_sent_at: str | None, window_seconds: int) -> bool:
+    if window_seconds <= 0:
+        return False
+    dt = _parse_iso_datetime(last_sent_at)
+    if not dt:
+        return False
+    delta_seconds = (now_local() - dt).total_seconds()
+    if delta_seconds < -60:
+        return False
+    return delta_seconds < window_seconds
+
+
+def _get_last_sent_at_for_user(conn: sqlite3.Connection, user_id: int) -> str:
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(last_sent_at, '') AS last_sent_at FROM bot_settings WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return ""
+    if not row:
+        return ""
+    return str(row["last_sent_at"] or "")
+
+
+def _mark_last_sent_now_for_user(conn: sqlite3.Connection, user_id: int) -> None:
+    now_txt = now_local_iso(sep="T")
+    try:
+        conn.execute(
+            """
+            INSERT INTO bot_settings (user_id, last_sent_at, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_sent_at = excluded.last_sent_at,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, now_txt, now_txt),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
 def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> str | None:
     groups = _group_scan_rows_for_image(rows)
     if not groups:
@@ -842,20 +952,22 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     meta_h = scaled(24)
     col_widths = [scaled(170), scaled(130), scaled(125), scaled(290)]
     headers = ["Rota", "Data voo", "Preço", "Onde comprar mais barato"]
+    total_rows = sum(len(items) for _, items in groups)
+    # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.
+    extra_rows = 0
+
     height = (
         padding_y * 2
         + title_h
         + meta_h
         + row_h
         + sum(section_h + len(items) * row_h for _, items in groups)
+        + (extra_rows * row_h)
         + 24
     )
 
     table_w = sum(col_widths)
     width = table_w + padding_x * 2
-    max_aspect = max(1.0, SCAN_IMAGE_MAX_ASPECT)
-    if width / max(height, 1) > max_aspect:
-        height = int(width / max_aspect)
 
     image = Image.new("RGB", (width, height), "#f4f6f8")
     draw = ImageDraw.Draw(image)
@@ -936,14 +1048,12 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
 
         if group_idx != len(groups) - 1:
             y += scaled(8)
-    if image.width < SCAN_IMAGE_TARGET_WIDTH:
-        target_h = int(round(image.height * (SCAN_IMAGE_TARGET_WIDTH / image.width)))
-        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-        image = image.resize((SCAN_IMAGE_TARGET_WIDTH, max(1, target_h)), resample=resample)
+    final_height = y + padding_y
+    cropped = image.crop((0, 0, width, final_height))
 
     tmp = NamedTemporaryFile(prefix="telegram_scan_", suffix=".png", delete=False)
     tmp.close()
-    image.save(tmp.name, format="PNG")
+    cropped.save(tmp.name, format="PNG")
     return tmp.name
 
 
@@ -996,6 +1106,10 @@ def send_user_telegram_message(
         chat_id = (row["chat_id"] or "").strip()
         if not token or not chat_id:
             return
+        if "agend" in (trigger or "").strip().lower():
+            last_sent_at = _get_last_sent_at_for_user(conn, user_id)
+            if _was_sent_recently(last_sent_at, SCHEDULER_SEND_COOLDOWN_SECONDS):
+                return
         if (text or "").strip():
             send_telegram_message_to(text, token=token, chat_id=chat_id)
         image_path = build_scan_results_image(image_rows or [], trigger=trigger)
@@ -1003,6 +1117,7 @@ def send_user_telegram_message(
             return
         try:
             send_telegram_photo_to(image_path, token=token, chat_id=chat_id)
+            _mark_last_sent_now_for_user(conn, user_id)
         finally:
             try:
                 os.remove(image_path)

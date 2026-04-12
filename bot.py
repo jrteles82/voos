@@ -24,6 +24,7 @@ DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
 OWNER_TELEGRAM_ID = "1748352987"
 MAX_ROUTES_DEFAULT = 4
+FREE_USES_LIMIT = 5
 PANEL_DIVIDER = "──────────────────────────"
 PANEL_TEXT = (
     "✈️ *Painel de Controle*\n"
@@ -191,6 +192,32 @@ def ensure_bot_tables() -> None:
         )
         '''
     )
+    cur.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS monetization_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            test_mode INTEGER DEFAULT 1,
+            charge_global INTEGER DEFAULT 0,
+            charge_admin_only INTEGER DEFAULT 1,
+            weekly_price REAL DEFAULT 5,
+            biweekly_price REAL DEFAULT 10,
+            monthly_price REAL DEFAULT 15
+        )
+        '''
+    )
+    cur.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS user_access (
+            chat_id TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'free',
+            expires_at TEXT,
+            free_uses INTEGER DEFAULT 0,
+            test_charge INTEGER DEFAULT 0,
+            total_paid REAL DEFAULT 0,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        '''
+    )
     for ddl in [
         "ALTER TABLE bot_settings ADD COLUMN enable_google_flights INTEGER DEFAULT 1",
         "ALTER TABLE bot_settings ADD COLUMN enable_maxmilhas INTEGER DEFAULT 0",
@@ -200,8 +227,101 @@ def ensure_bot_tables() -> None:
             cur.execute(ddl)
         except sqlite3.OperationalError:
             pass
+    cur.execute(
+        '''
+        INSERT OR IGNORE INTO monetization_settings (
+            id, test_mode, charge_global, charge_admin_only, weekly_price, biweekly_price, monthly_price
+        ) VALUES (1, 1, 0, 1, 5, 10, 15)
+        '''
+    )
     conn.commit()
     conn.close()
+
+
+def get_monetization_settings(conn):
+    row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
+    if row is None:
+        conn.execute(
+            'INSERT OR IGNORE INTO monetization_settings (id, test_mode, charge_global, charge_admin_only, weekly_price, biweekly_price, monthly_price) VALUES (1, 1, 0, 1, 5, 10, 15)'
+        )
+        conn.commit()
+        row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
+    return row
+
+
+def ensure_user_access(conn, chat_id: str):
+    conn.execute(
+        '''
+        INSERT OR IGNORE INTO user_access (chat_id, status, free_uses, test_charge, total_paid, updated_at)
+        VALUES (?, 'free', 0, 0, 0, datetime('now'))
+        ''',
+        (chat_id,)
+    )
+    conn.commit()
+    return conn.execute('SELECT * FROM user_access WHERE chat_id = ?', (chat_id,)).fetchone()
+
+
+def ensure_owner_test_access(conn):
+    access = ensure_user_access(conn, OWNER_TELEGRAM_ID)
+    settings = get_monetization_settings(conn)
+    desired_test = 1 if int(settings['test_mode']) == 1 else 0
+    if int(access['test_charge'] or 0) != desired_test:
+        conn.execute(
+            'UPDATE user_access SET test_charge = ?, updated_at = datetime(\'now\') WHERE chat_id = ?',
+            (desired_test, OWNER_TELEGRAM_ID)
+        )
+        conn.commit()
+
+
+def should_charge_user(conn, chat_id: str, access_row) -> bool:
+    settings = get_monetization_settings(conn)
+    if chat_id == OWNER_TELEGRAM_ID:
+        return bool(int(settings['charge_admin_only']) or int(access_row['test_charge'] or 0) or int(settings['charge_global']))
+    if int(settings['charge_admin_only']) == 1:
+        return False
+    return bool(int(settings['charge_global']) or int(access_row['test_charge'] or 0))
+
+
+def plan_catalog(settings_row):
+    return [
+        ('Semanal', float(settings_row['weekly_price']), 7),
+        ('Quinzenal', float(settings_row['biweekly_price']), 15),
+        ('Mensal', float(settings_row['monthly_price']), 30),
+    ]
+
+
+def plan_amount_by_name(settings_row, plan_name: str) -> float:
+    mapping = {
+        'Semanal': float(settings_row['weekly_price']),
+        'Quinzenal': float(settings_row['biweekly_price']),
+        'Mensal': float(settings_row['monthly_price']),
+        'Teste Admin': 1.0,
+    }
+    return float(mapping.get(plan_name, 1.0))
+
+
+def plan_days(plan_name: str) -> int:
+    mapping = {
+        'Semanal': 7,
+        'Quinzenal': 15,
+        'Mensal': 30,
+        'Teste Admin': 7,
+    }
+    return int(mapping.get(plan_name, 7))
+
+
+def offer_paid_plans_text(conn, chat_id: str) -> str:
+    access = ensure_user_access(conn, chat_id)
+    settings = get_monetization_settings(conn)
+    block_text = '⏰ Seu acesso venceu. Escolha um plano para renovar.' if (access['status'] or '') == 'expired' else f'🚫 Seus {FREE_USES_LIMIT} usos grátis acabaram.'
+    weekly, biweekly, monthly = plan_catalog(settings)
+    return (
+        f"{block_text}\n\n"
+        "💰 *Escolha um plano para continuar*\n\n"
+        f"🥉 {weekly[0]}: R$ {format_money_br(weekly[1])} ({weekly[2]} dias)\n"
+        f"🥈 {biweekly[0]}: R$ {format_money_br(biweekly[1])} ({biweekly[2]} dias)\n"
+        f"🥇 {monthly[0]}: R$ {format_money_br(monthly[1])} ({monthly[2]} dias)"
+    )
 
 
 def ensure_app_user(conn, first_name: str) -> int:
@@ -337,6 +457,46 @@ def full_menu_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def admin_panel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('👤 Ver Usuários', callback_data='painel:usuarios')],
+        [InlineKeyboardButton('💰 Ver Vendas', callback_data='painel:vendas')],
+        [InlineKeyboardButton('⚙️ Planos', callback_data='painel:planos')],
+        [InlineKeyboardButton('🧪 Modo Teste', callback_data='painel:modo_teste')],
+        [InlineKeyboardButton('🌐 Cobrança Geral', callback_data='painel:cobranca_global')],
+        [InlineKeyboardButton('👤 Cobrança Admin', callback_data='painel:cobranca_admin')],
+        [InlineKeyboardButton('💳 Gerar Pix', callback_data='painel:pix')],
+    ])
+
+
+def plans_adjust_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('Semanal +R$1', callback_data='painel:plan:weekly:up'),
+            InlineKeyboardButton('Semanal -R$1', callback_data='painel:plan:weekly:down'),
+        ],
+        [
+            InlineKeyboardButton('Quinzenal +R$1', callback_data='painel:plan:biweekly:up'),
+            InlineKeyboardButton('Quinzenal -R$1', callback_data='painel:plan:biweekly:down'),
+        ],
+        [
+            InlineKeyboardButton('Mensal +R$1', callback_data='painel:plan:monthly:up'),
+            InlineKeyboardButton('Mensal -R$1', callback_data='painel:plan:monthly:down'),
+        ],
+        [InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')],
+    ])
+
+
+def user_plan_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton('Pix Semanal', callback_data='userpix:Semanal'),
+            InlineKeyboardButton('Pix Quinzenal', callback_data='userpix:Quinzenal')
+        ],
+        [InlineKeyboardButton('Pix Mensal', callback_data='userpix:Mensal')],
+    ])
+
+
 def airport_keyboard(prefix: str) -> InlineKeyboardMarkup:
     buttons = []
     row = []
@@ -420,6 +580,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ''',
             (user.username or '', first_name, chat_id),
         )
+    ensure_user_access(conn, chat_id)
+    ensure_owner_test_access(conn)
     conn.commit()
     conn.close()
 
@@ -468,15 +630,23 @@ async def cmd_painel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != OWNER_TELEGRAM_ID:
         await update.message.reply_text('🚫 Comando restrito a administradores.')
         return
-        
+
+    conn = get_db()
+    ensure_owner_test_access(conn)
+    settings = get_monetization_settings(conn)
+    conn.close()
+
+    texto = (
+        '🛠 *Painel Administrativo*\n\n'
+        f"🧪 Modo teste: {'ATIVADO ✅' if int(settings['test_mode']) == 1 else 'DESATIVADO ❌'}\n"
+        f"🌐 Cobrança geral: {'ATIVA ✅' if int(settings['charge_global']) == 1 else 'DESATIVADA ❌'}\n"
+        f"👤 Cobrança só admin: {'ATIVA ✅' if int(settings['charge_admin_only']) == 1 else 'DESATIVADA ❌'}"
+    )
+
     await update.message.reply_text(
-        '🛠 *Painel Administrativo*\nBem-vindo, Sr. Junior!',
+        texto,
         parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton('👤 Ver Usuários', callback_data='painel:usuarios')],
-            [InlineKeyboardButton('💰 Ver Vendas', callback_data='painel:vendas')],
-            [InlineKeyboardButton('💳 Gerar Pix (Teste)', callback_data='painel:pix')],
-        ])
+        reply_markup=admin_panel_markup()
     )
 
 async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -485,26 +655,74 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id != OWNER_TELEGRAM_ID:
         await query.answer('Não autorizado', show_alert=True)
         return
-        
-    action = query.data.split(':', 1)[1]
-    
-    if action == 'usuarios':
-        conn = get_db()
-        users = conn.execute("SELECT user_id, chat_id, first_name, username, confirmed FROM bot_users").fetchall()
+
+    parts = query.data.split(':')
+    action = parts[1] if len(parts) > 1 else ''
+
+    conn = get_db()
+    ensure_owner_test_access(conn)
+
+    if query.data.startswith('userpix:'):
+        plan_name = query.data.split(':', 1)[1]
+        access = ensure_user_access(conn, chat_id)
+        if not should_charge_user(conn, chat_id, access):
+            conn.close()
+            await query.answer('Cobrança não disponível para este usuário.', show_alert=True)
+            return
+        settings = get_monetization_settings(conn)
+        amount = plan_amount_by_name(settings, plan_name)
+        payment = create_mp_pix_payment(chat_id, plan_name, amount)
+        qr_code = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('qr_code', '')
+        ticket_url = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('ticket_url', '')
+        save_payment(conn, str(payment.get('id')), chat_id, plan_name, amount, payment.get('status', 'pending'), qr_code, ticket_url)
         conn.close()
-        lines = [f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']}) - Confirmado: {u['confirmed']}" for u in users]
-        text = "👤 *Usuários Registrados*\n\n" + ("\n".join(lines) if lines else "_Nenhum_")
+        await query.edit_message_text(
+            f"💳 *Pix gerado com sucesso!*\n\n*Valor:* R$ {format_money_br(amount)}\n*ID:* `{payment.get('id')}`",
+            parse_mode='Markdown'
+        )
+        await query.message.reply_text(qr_code or 'Código Pix indisponível no momento.')
+        if ticket_url:
+            await query.message.reply_text(ticket_url)
+        await query.answer()
+        return
+
+    if action == 'usuarios':
+        users = conn.execute(
+            """
+            SELECT b.user_id, b.chat_id, b.first_name, b.username, b.confirmed,
+                   ua.status, ua.expires_at, ua.free_uses, ua.total_paid
+            FROM bot_users b
+            LEFT JOIN user_access ua ON ua.chat_id = b.chat_id
+            ORDER BY b.id DESC
+            """
+        ).fetchall()
+        lines = [
+            f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']})\n  Confirmado: {u['confirmed']} | Status: {u['status'] or 'free'} | Vencimento: {u['expires_at'] or '-'} | Total pago: R$ {format_money_br(u['total_paid'] or 0)}"
+            for u in users
+        ]
+        text = "👤 *Usuários Registrados*\n\n" + ("\n\n".join(lines) if lines else "_Nenhum_")
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]
         ]))
-        
+
     elif action == 'vendas':
-        conn = get_db()
         rows = conn.execute("SELECT mp_payment_id, plan_name, amount, status, created_at FROM payments ORDER BY created_at DESC LIMIT 10").fetchall()
-        conn.close()
+        total_aprovado = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'approved'").fetchone()[0]
+        total_pendente = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'pending'").fetchone()[0]
+        aprovados = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'approved'").fetchone()[0]
+        pendentes = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'pending'").fetchone()[0]
+        outros = conn.execute("SELECT COUNT(*) FROM payments WHERE status NOT IN ('approved', 'pending')").fetchone()[0]
         if rows:
-            lines = [f"• {r['plan_name'] or '-'} | R$ {format_money_br(r['amount'])} | {r['status']}" for r in rows]
-            texto = "💰 *Relatório de Vendas*\n\n" + "\n".join(lines)
+            lines = [f"• {r['mp_payment_id'] or '-'} | {r['plan_name'] or '-'} | R$ {format_money_br(r['amount'])} | {r['status']}" for r in rows]
+            texto = (
+                "💰 *Relatório de Vendas*\n\n"
+                f"Receita aprovada: *R$ {format_money_br(total_aprovado)}*\n"
+                f"Valor pendente: *R$ {format_money_br(total_pendente)}*\n\n"
+                f"Pagamentos aprovados: *{aprovados}*\n"
+                f"Pagamentos pendentes: *{pendentes}*\n"
+                f"Outros status: *{outros}*\n\n"
+                "Últimos registros:\n" + "\n".join(lines)
+            )
         else:
             texto = "💰 *Relatório de Vendas*\n\n_Nenhum pagamento registrado ainda._"
         await query.edit_message_text(
@@ -512,51 +730,163 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]])
         )
-        
+
+    elif action == 'planos':
+        settings = get_monetization_settings(conn)
+        texto = (
+            "⚙️ *Configuração de Planos*\n\n"
+            f"🥉 Semanal: R$ {format_money_br(settings['weekly_price'])} (7 dias)\n"
+            f"🥈 Quinzenal: R$ {format_money_br(settings['biweekly_price'])} (15 dias)\n"
+            f"🥇 Mensal: R$ {format_money_br(settings['monthly_price'])} (30 dias)"
+        )
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=plans_adjust_markup())
+
+    elif action == 'modo_teste':
+        settings = get_monetization_settings(conn)
+        novo = 0 if int(settings['test_mode']) == 1 else 1
+        conn.execute('UPDATE monetization_settings SET test_mode = ? WHERE id = 1', (novo,))
+        conn.execute('UPDATE user_access SET test_charge = ?, updated_at = datetime(\'now\') WHERE chat_id = ?', (novo, OWNER_TELEGRAM_ID))
+        conn.commit()
+        settings = get_monetization_settings(conn)
+        texto = (
+            '🛠 *Painel Administrativo*\n\n'
+            f"🧪 Modo teste: {'ATIVADO ✅' if int(settings['test_mode']) == 1 else 'DESATIVADO ❌'}\n"
+            f"🌐 Cobrança geral: {'ATIVA ✅' if int(settings['charge_global']) == 1 else 'DESATIVADA ❌'}\n"
+            f"👤 Cobrança só admin: {'ATIVA ✅' if int(settings['charge_admin_only']) == 1 else 'DESATIVADA ❌'}"
+        )
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=admin_panel_markup())
+
+    elif action == 'cobranca_global':
+        settings = get_monetization_settings(conn)
+        novo = 0 if int(settings['charge_global']) == 1 else 1
+        conn.execute('UPDATE monetization_settings SET charge_global = ? WHERE id = 1', (novo,))
+        conn.commit()
+        settings = get_monetization_settings(conn)
+        texto = (
+            '🛠 *Painel Administrativo*\n\n'
+            f"🧪 Modo teste: {'ATIVADO ✅' if int(settings['test_mode']) == 1 else 'DESATIVADO ❌'}\n"
+            f"🌐 Cobrança geral: {'ATIVA ✅' if int(settings['charge_global']) == 1 else 'DESATIVADA ❌'}\n"
+            f"👤 Cobrança só admin: {'ATIVA ✅' if int(settings['charge_admin_only']) == 1 else 'DESATIVADA ❌'}"
+        )
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=admin_panel_markup())
+
+    elif action == 'cobranca_admin':
+        settings = get_monetization_settings(conn)
+        novo = 0 if int(settings['charge_admin_only']) == 1 else 1
+        conn.execute('UPDATE monetization_settings SET charge_admin_only = ? WHERE id = 1', (novo,))
+        conn.commit()
+        settings = get_monetization_settings(conn)
+        texto = (
+            '🛠 *Painel Administrativo*\n\n'
+            f"🧪 Modo teste: {'ATIVADO ✅' if int(settings['test_mode']) == 1 else 'DESATIVADO ❌'}\n"
+            f"🌐 Cobrança geral: {'ATIVA ✅' if int(settings['charge_global']) == 1 else 'DESATIVADA ❌'}\n"
+            f"👤 Cobrança só admin: {'ATIVA ✅' if int(settings['charge_admin_only']) == 1 else 'DESATIVADA ❌'}"
+        )
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=admin_panel_markup())
+
     elif action == 'pix':
-        conn = get_db()
-        payment = create_mp_pix_payment(chat_id, 'Teste Admin', 1.0)
+        settings = get_monetization_settings(conn)
+        amount = 1.0 if int(settings['test_mode']) == 1 else float(settings['monthly_price'])
+        plan_name = 'Teste Admin' if int(settings['test_mode']) == 1 else 'Mensal'
+        payment = create_mp_pix_payment(chat_id, plan_name, amount)
         qr_code = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('qr_code', '')
         ticket_url = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('ticket_url', '')
-        save_payment(conn, str(payment.get('id')), chat_id, 'Teste Admin', 1.0, payment.get('status', 'pending'), qr_code, ticket_url)
-        conn.close()
+        save_payment(conn, str(payment.get('id')), chat_id, plan_name, amount, payment.get('status', 'pending'), qr_code, ticket_url)
         await query.edit_message_text(
-            f"💳 *Pix gerado com sucesso*\n\nValor: R$ 1,00\nID: `{payment.get('id')}`",
+            f"💳 *Pix gerado com sucesso!*\n\n*Valor:* R$ {format_money_br(amount)}\n*ID:* `{payment.get('id')}`",
             parse_mode='Markdown'
         )
-        await query.message.reply_text('PIX COPIA E COLA:')
-        await query.message.reply_text(f"`{qr_code or 'Código Pix indisponível no momento.'}`", parse_mode='Markdown')
+        await query.message.reply_text(qr_code or 'Código Pix indisponível no momento.')
         if ticket_url:
-            await query.message.reply_text(f'LINK PARA PAGAMENTO:\n{ticket_url}')
-        
+            await query.message.reply_text(ticket_url)
         await query.message.reply_text(
             'Selecione uma opção:',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Voltar ao painel', callback_data='painel:back')]])
         )
-        
+
+    elif action == 'plan' and len(parts) >= 4:
+        field = parts[2]
+        direction = parts[3]
+        mapping = {
+            'weekly': 'weekly_price',
+            'biweekly': 'biweekly_price',
+            'monthly': 'monthly_price',
+        }
+        column = mapping.get(field)
+        settings = get_monetization_settings(conn)
+        current = float(settings[column])
+        new_value = current + 1 if direction == 'up' else max(1, current - 1)
+        conn.execute(f'UPDATE monetization_settings SET {column} = ? WHERE id = 1', (new_value,))
+        conn.commit()
+        settings = get_monetization_settings(conn)
+        texto = (
+            "⚙️ *Configuração de Planos*\n\n"
+            f"🥉 Semanal: R$ {format_money_br(settings['weekly_price'])} (7 dias)\n"
+            f"🥈 Quinzenal: R$ {format_money_br(settings['biweekly_price'])} (15 dias)\n"
+            f"🥇 Mensal: R$ {format_money_br(settings['monthly_price'])} (30 dias)"
+        )
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=plans_adjust_markup())
+
     elif action == 'back':
-        await query.edit_message_text(
-            '🛠 *Painel Administrativo*\nBem-vindo, Sr. Junior!',
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton('👤 Ver Usuários', callback_data='painel:usuarios')],
-                [InlineKeyboardButton('💰 Ver Vendas', callback_data='painel:vendas')],
-                [InlineKeyboardButton('💳 Gerar Pix (Teste)', callback_data='painel:pix')],
-            ])
+        settings = get_monetization_settings(conn)
+        texto = (
+            '🛠 *Painel Administrativo*\n\n'
+            f"🧪 Modo teste: {'ATIVADO ✅' if int(settings['test_mode']) == 1 else 'DESATIVADO ❌'}\n"
+            f"🌐 Cobrança geral: {'ATIVA ✅' if int(settings['charge_global']) == 1 else 'DESATIVADA ❌'}\n"
+            f"👤 Cobrança só admin: {'ATIVA ✅' if int(settings['charge_admin_only']) == 1 else 'DESATIVADA ❌'}"
         )
-    
+        await query.edit_message_text(texto, parse_mode='Markdown', reply_markup=admin_panel_markup())
+
+    conn.close()
     await query.answer()
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     conn = get_db()
     msg = require_confirmation(conn, chat_id)
-    
+
     if msg:
         conn.close()
         await update.message.reply_text(msg, reply_markup=start_markup())
         return
-        
+
+    ensure_user_access(conn, chat_id)
+    ensure_owner_test_access(conn)
+    access = ensure_user_access(conn, chat_id)
+    should_charge = should_charge_user(conn, chat_id, access)
+
+    if should_charge:
+        expires_at = (access['expires_at'] or '').strip()
+        if access['status'] == 'active' and expires_at:
+            try:
+                if datetime.fromisoformat(expires_at) < datetime.now():
+                    conn.execute("UPDATE user_access SET status = 'expired', updated_at = datetime('now') WHERE chat_id = ?", (chat_id,))
+                    conn.commit()
+                    access = ensure_user_access(conn, chat_id)
+            except ValueError:
+                pass
+
+        if access['status'] != 'active':
+            free_uses = int(access['free_uses'] or 0)
+            if free_uses >= FREE_USES_LIMIT:
+                texto = offer_paid_plans_text(conn, chat_id)
+                conn.close()
+                await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=user_plan_markup())
+                return
+
+            conn.execute(
+                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+                (chat_id,)
+            )
+            conn.commit()
+            access = ensure_user_access(conn, chat_id)
+            conn.close()
+            await update.message.reply_text(
+                f"🆓 Uso grátis liberado ({int(access['free_uses'])}/{FREE_USES_LIMIT}).",
+                reply_markup=full_menu_markup(),
+            )
+            return
+
     row = get_bot_user_by_chat(conn, chat_id)
     cur = conn.execute('SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1', (row['user_id'],))
     routes_count = cur.fetchone()[0]
@@ -1180,6 +1510,7 @@ def main():
     app.add_handler(CallbackQueryHandler(removerrota_callback, pattern=r'^removerrota:'))
     app.add_handler(CallbackQueryHandler(sources_callback, pattern=r'^sources:'))
     app.add_handler(CallbackQueryHandler(painel_callback, pattern=r'^painel:'))
+    app.add_handler(CallbackQueryHandler(painel_callback, pattern=r'^userpix:'))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:'))
     app.run_polling()
 

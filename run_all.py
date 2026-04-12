@@ -28,6 +28,8 @@ def main():
         [py, str(BASE_DIR / 'bot.py')],
         [py, str(BASE_DIR / 'bot_scheduler.py')],
         [py, str(BASE_DIR / 'job_worker.py')],
+        [py, str(BASE_DIR / 'payment_monitor.py')],
+        [py, str(BASE_DIR / 'payment_webhook.py')],
     ]
 
     for cmd in children:

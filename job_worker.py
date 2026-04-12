@@ -202,11 +202,24 @@ def process_job(conn, bot: Bot, job):
     if not routes:
         raise RuntimeError('Usuário sem rotas ativas')
 
+    access = ensure_user_access(conn, chat_id)
+    charge_now = should_charge_user(conn, chat_id, access) and not is_active_access(access)
+    if charge_now:
+        free_uses = int(access['free_uses'] or 0)
+        if free_uses >= FREE_USES_LIMIT:
+            raise RuntimeError('bloqueado_por_monetizacao')
+
     cache_key = build_cache_key(user_id, routes, settings)
     cached_image = get_cached_image(conn, cache_key)
     if cached_image:
         send_photo(bot, chat_id, cached_image)
         mark_sent(conn, user_id)
+        if charge_now:
+            conn.execute(
+                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+                (chat_id,)
+            )
+            conn.commit()
         return
 
     parsed = run_scan_for_routes(
@@ -218,7 +231,15 @@ def process_job(conn, bot: Bot, job):
     )
     filtered = filter_rows_by_max_price(parsed, float(settings['max_price']))
     if not filtered:
-        if job['job_type'] == 'manual_now': asyncio.run(bot.send_message(chat_id=chat_id, text='Nenhuma passagem encontrada abaixo do limite de preço estabelecido.')); raise RuntimeError('Consulta sem resultados filtrados')
+        mensagem = '⚠️ Encontrei resultados, mas todos ficaram acima do valor máximo do seu filtro.'
+        asyncio.run(bot.send_message(chat_id=chat_id, text=mensagem))
+        if charge_now:
+            conn.execute(
+                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+                (chat_id,)
+            )
+            conn.commit()
+        raise RuntimeError('Consulta sem resultados filtrados')
 
     image_path = build_scan_results_image(filtered)
     if not image_path:
@@ -227,6 +248,12 @@ def process_job(conn, bot: Bot, job):
     save_cache(conn, cache_key, image_path)
     send_photo(bot, chat_id, image_path)
     mark_sent(conn, user_id)
+    if charge_now:
+        conn.execute(
+            "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+            (chat_id,)
+        )
+        conn.commit()
 
 
 def main():

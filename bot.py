@@ -23,8 +23,9 @@ DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
 OWNER_TELEGRAM_ID = "1748352987"
-MAX_ROUTES_DEFAULT = 4
-FREE_USES_LIMIT = 5
+MAX_ROUTES_DEFAULT = 6
+FREE_USES_LIMIT = 20
+PIX_PENDING_EXPIRATION_HOURS = 24
 PANEL_DIVIDER = "──────────────────────────"
 PANEL_TEXT = (
     "✈️ *Painel de Controle*\n"
@@ -324,6 +325,56 @@ def offer_paid_plans_text(conn, chat_id: str) -> str:
     )
 
 
+def user_payments_markup(rows) -> InlineKeyboardMarkup:
+    keyboard = []
+    for row in rows:
+        label = f"{row['plan_name'] or '-'} | R$ {format_money_br(row['amount'])} | {row['status']}"
+        keyboard.append([InlineKeyboardButton(label[:60], callback_data=f"payment:view:{row['mp_payment_id']}")])
+        if row['status'] == 'pending':
+            keyboard.append([InlineKeyboardButton('✅ Atualizar este pagamento', callback_data=f"payment:check:{row['mp_payment_id']}")])
+    keyboard.append([InlineKeyboardButton('⬅️ Voltar ao menu', callback_data='menu:back')])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def is_active_access(access_row) -> bool:
+    if not access_row:
+        return False
+    if (access_row['status'] or '') != 'active':
+        return False
+    expires_at = (access_row['expires_at'] or '').strip()
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) > datetime.now()
+    except ValueError:
+        return False
+
+
+def get_valid_pending_payment(conn, chat_id: str):
+    row = conn.execute(
+        '''
+        SELECT mp_payment_id, plan_name, amount, status, qr_code, ticket_url, created_at
+        FROM payments
+        WHERE chat_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+        ''',
+        (chat_id,)
+    ).fetchone()
+    if not row:
+        return None
+    created_at = (row['created_at'] or '').strip()
+    if not created_at:
+        return None
+    try:
+        created_dt = datetime.fromisoformat(created_at.replace(' ', 'T'))
+    except ValueError:
+        return None
+    if datetime.now() - created_dt > __import__('datetime').timedelta(hours=PIX_PENDING_EXPIRATION_HOURS):
+        return None
+    return row
+
+
 def ensure_app_user(conn, first_name: str) -> int:
     row = conn.execute(
         "SELECT id FROM users WHERE email = ?",
@@ -381,6 +432,68 @@ def save_payment(conn, mp_payment_id: str, chat_id: str, plan_name: str, amount:
         (mp_payment_id, chat_id, plan_name, amount, status, qr_code, ticket_url),
     )
     conn.commit()
+
+
+def get_mp_payment(payment_id: str) -> dict:
+    if not MP_ACCESS_TOKEN:
+        raise RuntimeError('MP_ACCESS_TOKEN não configurado no .env')
+    headers = {
+        'Authorization': f'Bearer {MP_ACCESS_TOKEN}',
+        'Content-Type': 'application/json',
+    }
+    response = requests.get(f'https://api.mercadopago.com/v1/payments/{payment_id}', headers=headers, timeout=30)
+    data = response.json()
+    if response.status_code >= 400:
+        raise RuntimeError(data.get('message') or 'Erro ao consultar pagamento Pix')
+    return data
+
+
+def add_days_to_expiration(current_expiration: str | None, days: int) -> str:
+    base = datetime.now()
+    if current_expiration:
+        try:
+            parsed = datetime.fromisoformat(current_expiration)
+            if parsed > base:
+                base = parsed
+        except ValueError:
+            pass
+    return (base + __import__('datetime').timedelta(days=days)).replace(microsecond=0).isoformat(sep=' ')
+
+
+def apply_approved_payment(conn, payment_id: str) -> tuple[bool, str]:
+    row = conn.execute(
+        'SELECT mp_payment_id, chat_id, plan_name, amount, status FROM payments WHERE mp_payment_id = ?',
+        (payment_id,)
+    ).fetchone()
+    if not row:
+        return False, 'pagamento_nao_encontrado'
+
+    payment = get_mp_payment(payment_id)
+    status = payment.get('status', row['status'])
+    approved_at = payment.get('date_approved')
+    conn.execute(
+        'UPDATE payments SET status = ?, approved_at = COALESCE(?, approved_at) WHERE mp_payment_id = ?',
+        (status, approved_at, payment_id)
+    )
+
+    if status != 'approved':
+        conn.commit()
+        return False, status
+
+    chat_id = str(row['chat_id'])
+    plan_name = row['plan_name'] or 'Teste Admin'
+    access = ensure_user_access(conn, chat_id)
+    expires_at = add_days_to_expiration(access['expires_at'], plan_days(plan_name))
+    conn.execute(
+        '''
+        UPDATE user_access
+        SET status = ?, expires_at = ?, free_uses = 0, total_paid = COALESCE(total_paid, 0) + ?, updated_at = datetime('now')
+        WHERE chat_id = ?
+        ''',
+        ('active', expires_at, float(row['amount'] or 0), chat_id)
+    )
+    conn.commit()
+    return True, expires_at
 
 
 def get_user_id_by_chat(conn, chat_id: str):
@@ -445,16 +558,20 @@ def force_reply_markup(placeholder: str) -> ForceReply:
     return ForceReply(selective=False, input_field_placeholder=placeholder)
 
 
-def full_menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def full_menu_markup(chat_id: str | None = None) -> InlineKeyboardMarkup:
+    keyboard = [
         [InlineKeyboardButton('➕ Adicionar nova rota', callback_data='menu:addrota')],
         [InlineKeyboardButton('➖ Remover rota cadastrada', callback_data='menu:removerrota')],
         [InlineKeyboardButton('📋 Ver minhas rotas ativas', callback_data='menu:minhasrotas')],
         [InlineKeyboardButton('💰 Ajustar limite de preço', callback_data='menu:limite')],
         [InlineKeyboardButton('🔎 Configurar fontes de busca', callback_data='menu:fontes')],
         [InlineKeyboardButton('🖼️ Gerar consulta manual agora', callback_data='menu:agora')],
+        [InlineKeyboardButton('💳 Meus pagamentos', callback_data='menu:pagamentos')],
         [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
-    ])
+    ]
+    if str(chat_id or '') == OWNER_TELEGRAM_ID:
+        keyboard.append([InlineKeyboardButton('🛠 Painel', callback_data='menu:adminpainel')])
+    return InlineKeyboardMarkup(keyboard)
 
 
 def admin_panel_markup() -> InlineKeyboardMarkup:
@@ -494,6 +611,14 @@ def user_plan_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton('Pix Quinzenal', callback_data='userpix:Quinzenal')
         ],
         [InlineKeyboardButton('Pix Mensal', callback_data='userpix:Mensal')],
+    ])
+
+
+def pending_payment_markup(payment_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('✅ Verificar pagamento', callback_data=f'painel:checkpay:{payment_id}')],
+        [InlineKeyboardButton('❌ Cancelar pagamento', callback_data=f'payment:cancel:{payment_id}')],
+        [InlineKeyboardButton('⬅️ Voltar ao painel', callback_data='menu:back')],
     ])
 
 
@@ -621,7 +746,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(
         msg_text,
         parse_mode='Markdown',
-        reply_markup=full_menu_markup(),
+        reply_markup=full_menu_markup(chat_id),
     )
 
 
@@ -669,6 +794,27 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             await query.answer('Cobrança não disponível para este usuário.', show_alert=True)
             return
+        if is_active_access(access):
+            conn.close()
+            await query.message.reply_text(f"✅ Você já tem um plano ativo até {access['expires_at']}. Não é necessário gerar outro Pix agora.")
+            await query.answer()
+            return
+        existing_pending = get_valid_pending_payment(conn, chat_id)
+        if existing_pending:
+            conn.close()
+            await query.edit_message_text(
+                f"💳 *Você já tem um Pix pendente válido*\n\n*Plano:* {existing_pending['plan_name']}\n*Valor:* R$ {format_money_br(existing_pending['amount'])}\n*ID:* `{existing_pending['mp_payment_id']}`",
+                parse_mode='Markdown'
+            )
+            await query.message.reply_text(existing_pending['qr_code'] or 'Código Pix indisponível no momento.')
+            if existing_pending['ticket_url']:
+                await query.message.reply_text(existing_pending['ticket_url'])
+            await query.message.reply_text(
+                'Selecione uma opção:',
+                reply_markup=pending_payment_markup(str(existing_pending['mp_payment_id']))
+            )
+            await query.answer()
+            return
         settings = get_monetization_settings(conn)
         amount = plan_amount_by_name(settings, plan_name)
         payment = create_mp_pix_payment(chat_id, plan_name, amount)
@@ -683,6 +829,10 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(qr_code or 'Código Pix indisponível no momento.')
         if ticket_url:
             await query.message.reply_text(ticket_url)
+        await query.message.reply_text(
+            'Selecione uma opção:',
+            reply_markup=pending_payment_markup(str(payment.get("id")))
+        )
         await query.answer()
         return
 
@@ -697,7 +847,7 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
         ).fetchall()
         lines = [
-            f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']})\n  Confirmado: {u['confirmed']} | Status: {u['status'] or 'free'} | Vencimento: {u['expires_at'] or '-'} | Total pago: R$ {format_money_br(u['total_paid'] or 0)}"
+            f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']})\n  Confirmado: {u['confirmed']} | Status: {u['status'] or 'free'} | Vencimento: {u['expires_at'] or '-'} | Grátis: {int(u['free_uses'] or 0)}/{FREE_USES_LIMIT} | Total pago: R$ {format_money_br(u['total_paid'] or 0)}"
             for u in users
         ]
         text = "👤 *Usuários Registrados*\n\n" + ("\n\n".join(lines) if lines else "_Nenhum_")
@@ -801,7 +951,30 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(ticket_url)
         await query.message.reply_text(
             'Selecione uma opção:',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Voltar ao painel', callback_data='painel:back')]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('✅ Verificar pagamento', callback_data=f'painel:checkpay:{payment.get("id")}')],
+                [InlineKeyboardButton('Voltar ao painel', callback_data='painel:back')]
+            ])
+        )
+
+    elif action == 'checkpay' and len(parts) >= 3:
+        payment_id = parts[2]
+        approved, info = apply_approved_payment(conn, payment_id)
+        if approved:
+            await query.message.reply_text(f'🎉 Pagamento aprovado! Acesso liberado até {info}.')
+        else:
+            await query.message.reply_text(f'⏳ Pagamento ainda não aprovado. Status atual: {info}')
+
+    elif action == 'cancel' and len(parts) >= 3:
+        payment_id = parts[2]
+        conn.execute(
+            "UPDATE payments SET status = 'cancelled' WHERE mp_payment_id = ? AND chat_id = ? AND status = 'pending'",
+            (payment_id, chat_id)
+        )
+        conn.commit()
+        await query.message.reply_text(
+            '❌ Pagamento cancelado. Escolha um novo plano:',
+            reply_markup=user_plan_markup()
         )
 
     elif action == 'plan' and len(parts) >= 4:
@@ -866,27 +1039,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
 
-        if access['status'] != 'active':
-            free_uses = int(access['free_uses'] or 0)
-            if free_uses >= FREE_USES_LIMIT:
-                texto = offer_paid_plans_text(conn, chat_id)
-                conn.close()
-                await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=user_plan_markup())
-                return
-
-            conn.execute(
-                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
-                (chat_id,)
-            )
-            conn.commit()
-            access = ensure_user_access(conn, chat_id)
-            conn.close()
-            await update.message.reply_text(
-                f"🆓 Uso grátis liberado ({int(access['free_uses'])}/{FREE_USES_LIMIT}).",
-                reply_markup=full_menu_markup(),
-            )
-            return
-
     row = get_bot_user_by_chat(conn, chat_id)
     cur = conn.execute('SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1', (row['user_id'],))
     routes_count = cur.fetchone()[0]
@@ -897,7 +1049,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         msg_text,
         parse_mode='Markdown',
-        reply_markup=full_menu_markup(),
+        reply_markup=full_menu_markup(chat_id),
     )
 
 
@@ -1293,6 +1445,19 @@ async def agora(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, reply_markup=start_markup())
         return
 
+    ensure_user_access(conn, chat_id)
+    ensure_owner_test_access(conn)
+    access = ensure_user_access(conn, chat_id)
+    should_charge = should_charge_user(conn, chat_id, access)
+
+    if should_charge and not is_active_access(access):
+        free_uses = int(access['free_uses'] or 0)
+        if free_uses >= FREE_USES_LIMIT:
+            texto = offer_paid_plans_text(conn, chat_id)
+            conn.close()
+            await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=user_plan_markup())
+            return
+
     user_id = get_user_id_by_chat(conn, chat_id)
     routes = conn.execute(
         'SELECT 1 FROM user_routes WHERE user_id = ? AND active = 1 LIMIT 1',
@@ -1375,6 +1540,64 @@ async def limite_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(':')
+    action = parts[1] if len(parts) > 1 else ''
+    payment_id = parts[2] if len(parts) > 2 else None
+    chat_id = str(query.message.chat.id)
+    conn = get_db()
+    try:
+        if action == 'view' and payment_id:
+            row = conn.execute(
+                'SELECT mp_payment_id, plan_name, amount, status, created_at, approved_at FROM payments WHERE mp_payment_id = ? AND chat_id = ?',
+                (payment_id, chat_id)
+            ).fetchone()
+            if not row:
+                await query.message.reply_text('Pagamento não encontrado.')
+                return
+            texto = (
+                '💳 *Detalhes do pagamento*\n\n'
+                f"ID: `{row['mp_payment_id']}`\n"
+                f"Plano: {row['plan_name'] or '-'}\n"
+                f"Valor: R$ {format_money_br(row['amount'])}\n"
+                f"Status: {row['status']}\n"
+                f"Criado em: {row['created_at'] or '-'}\n"
+                f"Aprovado em: {row['approved_at'] or '-'}"
+            )
+            await query.message.reply_text(
+                texto,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Voltar aos pagamentos', callback_data='menu:pagamentos')]])
+            )
+        elif action == 'check' and payment_id:
+            approved, info = apply_approved_payment(conn, payment_id)
+            if approved:
+                await query.message.reply_text(f'🎉 Pagamento aprovado! Acesso liberado até {info}.')
+            else:
+                await query.message.reply_text(f'⏳ Pagamento ainda não aprovado. Status atual: {info}')
+        elif action == 'cancel' and payment_id:
+            conn.execute(
+                "UPDATE payments SET status = 'cancelled' WHERE mp_payment_id = ? AND chat_id = ? AND status = 'pending'",
+                (payment_id, chat_id)
+            )
+            conn.commit()
+            texto = offer_paid_plans_text(conn, chat_id)
+            await query.edit_message_text(
+                texto,
+                parse_mode='Markdown',
+                reply_markup=user_plan_markup()
+            )
+        elif action == 'changeplan':
+            await query.edit_message_text(
+                '💰 Escolha um plano:',
+                reply_markup=user_plan_markup()
+            )
+    finally:
+        conn.close()
+
+
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     action = query.data.split(':', 1)[1]
@@ -1423,9 +1646,36 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer('Abrindo instruções...')
         fake_update = Update(update.update_id, message=query.message)
         await manual(fake_update, context)
+    elif action == 'pagamentos':
+        await query.answer('Abrindo pagamentos...')
+        conn = get_db()
+        rows = conn.execute(
+            '''
+            SELECT mp_payment_id, plan_name, amount, status, created_at
+            FROM payments
+            WHERE chat_id = ?
+              AND NOT (status = 'pending' AND datetime(created_at) < datetime('now', '-24 hours'))
+            ORDER BY created_at DESC
+            LIMIT 15
+            ''',
+            (chat_id,)
+        ).fetchall()
+        conn.close()
+        if rows:
+            texto = '💳 *Meus pagamentos*\n\nSelecione um pagamento para ver detalhes ou atualizar.'
+            await query.message.reply_text(texto, parse_mode='Markdown', reply_markup=user_payments_markup(rows))
+        else:
+            await query.message.reply_text('💳 Você ainda não tem pagamentos registrados.', reply_markup=full_menu_markup(chat_id))
+    elif action == 'adminpainel':
+        await query.answer('Abrindo painel...')
+        if chat_id != OWNER_TELEGRAM_ID:
+            await query.message.reply_text('🚫 Comando restrito a administradores.')
+            return ConversationHandler.END
+        fake_update = Update(update.update_id, message=query.message)
+        await cmd_painel(fake_update, context)
     elif action == 'back':
         await query.answer('Voltando ao menu...')
-        await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=full_menu_markup())
+        await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=full_menu_markup(chat_id))
 
     return ConversationHandler.END
 
@@ -1436,7 +1686,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'ℹ️ Ação cancelada.\n\n' + get_panel_text(chat_id),
         parse_mode='Markdown',
-        reply_markup=full_menu_markup()
+        reply_markup=full_menu_markup(chat_id)
     )
     return ConversationHandler.END
 
@@ -1511,6 +1761,7 @@ def main():
     app.add_handler(CallbackQueryHandler(sources_callback, pattern=r'^sources:'))
     app.add_handler(CallbackQueryHandler(painel_callback, pattern=r'^painel:'))
     app.add_handler(CallbackQueryHandler(painel_callback, pattern=r'^userpix:'))
+    app.add_handler(CallbackQueryHandler(payment_callback, pattern=r'^payment:'))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:'))
     app.run_polling()
 

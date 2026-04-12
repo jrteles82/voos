@@ -14,6 +14,8 @@ ENV_PATH = BASE_DIR / '.env'
 DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 INTERVAL_SECONDS = 1800
 SEND_COOLDOWN_SECONDS = 1700
+FREE_USES_LIMIT = 20
+OWNER_TELEGRAM_ID = '1748352987'
 
 
 def load_env(path: Path) -> None:
@@ -35,6 +37,48 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_user_access(conn, chat_id: str):
+    conn.execute(
+        '''
+        INSERT OR IGNORE INTO user_access (chat_id, status, free_uses, test_charge, total_paid, updated_at)
+        VALUES (?, 'free', 0, 0, 0, datetime('now'))
+        ''',
+        (chat_id,)
+    )
+    conn.commit()
+    return conn.execute('SELECT * FROM user_access WHERE chat_id = ?', (chat_id,)).fetchone()
+
+
+def get_monetization_settings(conn):
+    row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
+    return row
+
+
+def should_charge_user(conn, chat_id: str, access_row) -> bool:
+    settings = get_monetization_settings(conn)
+    if not settings:
+        return False
+    if chat_id == OWNER_TELEGRAM_ID:
+        return bool(int(settings['charge_admin_only']) or int(access_row['test_charge'] or 0) or int(settings['charge_global']))
+    if int(settings['charge_admin_only']) == 1:
+        return False
+    return bool(int(settings['charge_global']) or int(access_row['test_charge'] or 0))
+
+
+def is_active_access(access_row) -> bool:
+    if not access_row:
+        return False
+    if (access_row['status'] or '') != 'active':
+        return False
+    expires_at = (access_row['expires_at'] or '').strip()
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(expires_at) > datetime.now()
+    except ValueError:
+        return False
 
 
 def iter_users(conn):
@@ -76,6 +120,13 @@ def mark_sent(conn, user_id: int):
 
 
 def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, sources: dict) -> tuple[bool, str]:
+    access = ensure_user_access(conn, chat_id)
+    charge_now = should_charge_user(conn, chat_id, access) and not is_active_access(access)
+    if charge_now:
+        free_uses = int(access['free_uses'] or 0)
+        if free_uses >= FREE_USES_LIMIT:
+            return False, 'bloqueado_por_monetizacao'
+
     routes = _build_user_routes(conn, user_id)
     if not routes:
         return False, 'sem_rotas_ativas'
@@ -83,6 +134,13 @@ def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, s
     parsed = run_scan_for_routes(routes, sources=sources)
     filtered = filter_rows_by_max_price(parsed, max_price)
     if not filtered:
+        asyncio.run(bot.send_message(chat_id=chat_id, text='⚠️ Encontrei resultados, mas todos ficaram acima do valor máximo do seu filtro.'))
+        if charge_now:
+            conn.execute(
+                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+                (chat_id,)
+            )
+            conn.commit()
         return False, 'sem_resultado_no_limite'
 
     image_path = build_scan_results_image(filtered)
@@ -92,6 +150,12 @@ def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, s
     try:
         with open(image_path, 'rb') as image_file:
             asyncio.run(bot.send_photo(chat_id=chat_id, photo=image_file))
+        if charge_now:
+            conn.execute(
+                "UPDATE user_access SET free_uses = free_uses + 1, updated_at = datetime('now') WHERE chat_id = ?",
+                (chat_id,)
+            )
+            conn.commit()
         return True, 'enviado'
     finally:
         try:

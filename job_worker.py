@@ -16,11 +16,11 @@ from access_policy import (
     should_charge_user,
 )
 from config import DB_PATH, TOKEN, now_local
-from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
+from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price, filter_rows_with_vendor
 
 POLL_SECONDS = int(os.getenv("JOB_WORKER_POLL_SECONDS", "5"))
 CACHE_TTL_SECONDS = int(os.getenv("JOB_WORKER_CACHE_TTL_SECONDS", "600"))
-CACHE_RENDER_VERSION = os.getenv("JOB_WORKER_CACHE_RENDER_VERSION", "2026-04-12-v2")
+CACHE_RENDER_VERSION = os.getenv("JOB_WORKER_CACHE_RENDER_VERSION", "2026-04-12-v3")
 
 
 def get_db():
@@ -188,6 +188,7 @@ def mark_sent(conn, user_id: int):
 def process_job(conn, bot: Bot, job):
     user_id = int(job['user_id'])
     chat_id = str(job['chat_id'])
+    use_cache = False
     settings = get_user_settings(conn, user_id)
     routes = _build_user_routes(conn, user_id)
     if not routes:
@@ -202,7 +203,7 @@ def process_job(conn, bot: Bot, job):
             raise RuntimeError('bloqueado_por_monetizacao')
 
     cache_key = build_cache_key(user_id, routes, settings)
-    cached_image = get_cached_image(conn, cache_key)
+    cached_image = get_cached_image(conn, cache_key) if use_cache else None
     if cached_image:
         send_photo(bot, chat_id, cached_image)
         mark_sent(conn, user_id)
@@ -222,8 +223,9 @@ def process_job(conn, bot: Bot, job):
         },
     )
     filtered = filter_rows_by_max_price(parsed, float(settings['max_price']))
+    filtered = filter_rows_with_vendor(filtered)
     if not filtered:
-        mensagem = '⚠️ Encontrei resultados, mas todos ficaram acima do valor máximo do seu filtro.'
+        mensagem = '⚠️ Nenhuma rota com companhia aérea confirmada dentro do seu filtro.'
         asyncio.run(bot.send_message(chat_id=chat_id, text=mensagem))
         if charge_now:
             conn.execute(
@@ -233,11 +235,12 @@ def process_job(conn, bot: Bot, job):
             conn.commit()
         raise RuntimeError('Consulta sem resultados filtrados')
 
-    image_path = build_scan_results_image(filtered)
+    image_path = build_scan_results_image(filtered, trigger="manual")
     if not image_path:
         raise RuntimeError('Falha ao gerar print da consulta')
 
-    save_cache(conn, cache_key, image_path)
+    if use_cache:
+        save_cache(conn, cache_key, image_path)
     send_photo(bot, chat_id, image_path)
     mark_sent(conn, user_id)
     if charge_now:

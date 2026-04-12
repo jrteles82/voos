@@ -399,6 +399,10 @@ def build_google_flights_url(route: RouteQuery) -> str:
     else:
         q = f"{route.origin} to {route.destination} {route.outbound_date} return {route.inbound_date}"
     base_url = str(CONFIG["google_flights_base_url"]).rstrip("/")
+    if base_url.endswith("/travel/flights"):
+        base_url = f"{base_url}/search"
+    elif "/travel/flights/search" not in base_url:
+        base_url = "https://www.google.com/travel/flights/search"
     hl = str(CONFIG["google_hl"])
     gl = str(CONFIG["google_gl"])
     curr = str(CONFIG["google_curr"])
@@ -456,6 +460,41 @@ class GoogleFlightsScraper:
         if extra_wait > 0:
             time.sleep(extra_wait)
 
+    def _ensure_flights_tab(self, page) -> bool:
+        switched = False
+        url = (page.url or "").lower()
+        if "/travel/flights/search" in url:
+            return False
+        for label in ["Voos", "Flights"]:
+            try:
+                loc = page.get_by_role("button", name=re.compile(rf"^{label}$", re.I))
+                if loc.count() > 0:
+                    loc.first.click(timeout=3000)
+                    time.sleep(1.0)
+                    switched = True
+                    return switched
+            except Exception:
+                pass
+            try:
+                loc = page.get_by_role("link", name=re.compile(rf"^{label}$", re.I))
+                if loc.count() > 0:
+                    loc.first.click(timeout=3000)
+                    time.sleep(1.0)
+                    switched = True
+                    return switched
+            except Exception:
+                pass
+            try:
+                loc = page.get_by_text(label, exact=True)
+                if loc.count() > 0:
+                    loc.first.click(timeout=3000)
+                    time.sleep(1.0)
+                    switched = True
+                    return switched
+            except Exception:
+                pass
+        return switched
+
     def _extract_summary_price(self, page) -> float | None:
         patterns = [
             r"Menores preços\s+a partir de\s+R\$\s*([\d\.]+(?:,\d{2})?)",
@@ -508,7 +547,26 @@ class GoogleFlightsScraper:
             return False
         return any(x in low for x in ["parada", "escalas", "co2", "emissões", "voo", "aeroporto"])
 
-    def _extract_visible_flight_cards(self, page) -> list[dict]:
+    def _extract_card_date_iso_from_text(self, text: str, fallback_year: int) -> str | None:
+        month_map = {
+            "jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
+            "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12,
+        }
+        low = (text or "").lower()
+        m = re.search(r"\b(\d{1,2})\s+de\s+([a-zç]{3,9})\b", low)
+        if not m:
+            return None
+        try:
+            day = int(m.group(1))
+        except Exception:
+            return None
+        raw_month = m.group(2)[:3]
+        month = month_map.get(raw_month)
+        if not month:
+            return None
+        return f"{fallback_year:04d}-{month:02d}-{day:02d}"
+
+    def _extract_visible_flight_cards(self, page, route: RouteQuery) -> list[dict]:
         cards = []
         selectors = [
             "[role='main'] [role='listitem']",
@@ -534,6 +592,10 @@ class GoogleFlightsScraper:
                         continue
 
                     if not self._is_probable_flight_card(txt):
+                        continue
+
+                    card_date_iso = self._extract_card_date_iso_from_text(txt, fallback_year=int(route.outbound_date[:4]))
+                    if card_date_iso and card_date_iso != route.outbound_date:
                         continue
 
                     nums = re.findall(r"R\$\s*([\d\.]+(?:,\d{2})?)", txt)
@@ -576,6 +638,68 @@ class GoogleFlightsScraper:
             return (abs(price - summary_price), price)
 
         return sorted(cards, key=_score)
+
+    def _extract_airline_from_card_text(self, text: str) -> str:
+        txt = (text or "").lower()
+        if "azul" in txt:
+            return "Azul"
+        if "latam" in txt:
+            return "LATAM"
+        if "gol" in txt:
+            return "GOL"
+        if "voepass" in txt:
+            return "VOEPASS"
+        if "avianca" in txt:
+            return "Avianca"
+        if "tap" in txt:
+            return "TAP"
+        if "copa" in txt:
+            return "Copa"
+        return ""
+
+    def _infer_airline_from_page_text(self, page) -> str:
+        try:
+            txt = page.locator("[role='main']").first.inner_text(timeout=2500).lower()
+        except Exception:
+            return ""
+        hits = []
+        for token, label in [
+            ("azul", "Azul"),
+            ("latam", "LATAM"),
+            ("gol", "GOL"),
+            ("voepass", "VOEPASS"),
+            ("avianca", "Avianca"),
+            ("tap", "TAP"),
+            ("copa", "Copa"),
+        ]:
+            if token in txt:
+                hits.append(label)
+        unique = sorted(set(hits))
+        if len(unique) == 1:
+            return unique[0]
+        return ""
+
+    def _extract_fallback_price_from_page_text(self, page) -> float | None:
+        try:
+            txt = page.locator("body").inner_text(timeout=3500)
+        except Exception:
+            return None
+        if not txt:
+            return None
+        prices = re.findall(r"R\$\s*([\d\.]+(?:,\d{2})?)", txt)
+        values = []
+        for raw in prices[:40]:
+            try:
+                values.append(float(raw.replace(".", "").replace(",", ".")))
+            except Exception:
+                pass
+        if not values:
+            return None
+        # Evita pegar valores muito baixos/ruído de taxas isoladas.
+        candidates = [v for v in values if v >= 300]
+        if not candidates:
+            return None
+        return min(candidates)
 
     def _try_click(self, target) -> bool:
         strategies = [
@@ -678,10 +802,23 @@ class GoogleFlightsScraper:
         options = []
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         known_vendors = [
-            "maxmilhas", "zupper", "decolar", "booking", "gol", "latam", "azul",
+            "azul", "latam", "gol", "voepass", "tap", "avianca", "copa",
+            "maxmilhas", "zupper", "decolar", "booking", "kiwi", "expedia",
             "123 milhas", "123milhas", "viajanet", "voeazul", "smiles", "kayak",
             "mytrip", "trip.com", "edreams", "kiwi", "cvc", "submarino viagens",
         ]
+
+        # Captura explícita do bloco "Reserve com a <companhia> ... Companhia aérea ... R$ X"
+        for vendor, raw_price in re.findall(
+            r"Reserve com(?: a)?\s+([^\n\r]+?)\s+Companhia a[ée]rea[\s\S]{0,120}?R\$\s*([\d\.]+(?:,\d{2})?)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            try:
+                price = float(raw_price.replace(".", "").replace(",", "."))
+            except Exception:
+                continue
+            options.append({"vendor": vendor.strip(), "price": price})
 
         for idx, line in enumerate(lines):
             low = line.lower()
@@ -697,6 +834,7 @@ class GoogleFlightsScraper:
                 m = re.search(r"(?:Reserve com a|Reservar com|Comprar com|Emitido por|Vendido por)\s+([^\n\r]+)", context, re.I)
                 if m:
                     vendor = m.group(1).strip(" :-")
+                    vendor = re.sub(r"\s+Companhia a[ée]rea.*$", "", vendor, flags=re.I).strip()
 
             if prices:
                 try:
@@ -751,6 +889,23 @@ class GoogleFlightsScraper:
         return None
 
     def _extract_booking_options(self, page) -> tuple[str, float | None, list[dict]]:
+        def _is_airline_vendor(name: str) -> bool:
+            txt = (name or "").strip().lower()
+            if not txt:
+                return False
+            blocked = (
+                "google flights", "google",
+                "maxmilhas", "decolar", "kayak", "booking", "viajanet", "zupper", "123 milhas", "123milhas",
+                "smiles", "123_ milhas",
+            )
+            if any(term in txt for term in blocked):
+                return False
+            airline_terms = (
+                "azul", "latam", "gol", "voepass", "tap", "avianca", "copa",
+                "american", "united", "delta", "air france", "klm", "iberia", "lufthansa",
+            )
+            return any(term in txt for term in airline_terms)
+
         blocks = self._collect_booking_text_blocks(page)
         options = []
         for block in blocks:
@@ -792,11 +947,12 @@ class GoogleFlightsScraper:
         booking_total_price = self._extract_booking_total_price(page)
         if not cleaned:
             return "", booking_total_price, []
-        best = sorted(cleaned, key=lambda x: x["price"])[0]
+        airline_options = [item for item in cleaned if _is_airline_vendor(item.get("vendor", ""))]
+        if not airline_options:
+            return "", booking_total_price, cleaned
+        best = sorted(airline_options, key=lambda x: x["price"])[0]
         best_price = best["price"]
-        if booking_total_price is not None:
-            best_price = min(best_price, booking_total_price)
-        return best["vendor"], best_price, cleaned
+        return best["vendor"], best_price, airline_options
 
     def search(self, route: RouteQuery) -> FlightResult:
         context = getattr(self.browser, "new_context", None)
@@ -815,6 +971,9 @@ class GoogleFlightsScraper:
         try:
             page.goto(url, wait_until="domcontentloaded")
             self._accept_cookies_if_present(page)
+            switched_tab = self._ensure_flights_tab(page)
+            notes.append(f"url_pos_abertura={page.url}")
+            notes.append(f"forcou_aba_voos={'sim' if switched_tab else 'nao'}")
             self._wait_briefly_for_results(page)
 
             summary_price = self._extract_summary_price(page)
@@ -823,7 +982,14 @@ class GoogleFlightsScraper:
             clicked_lowest = self._click_lowest_prices_tab(page)
             notes.append(f"clicou_menores_precos={'sim' if clicked_lowest else 'nao'}")
 
-            cards = self._extract_visible_flight_cards(page)
+            cards = self._extract_visible_flight_cards(page, route)
+            if not cards:
+                notes.append("retry_cards_vazios=sim")
+                switched_tab_retry = self._ensure_flights_tab(page)
+                if switched_tab_retry:
+                    notes.append("retry_forcou_aba_voos=sim")
+                self._wait_briefly_for_results(page)
+                cards = self._extract_visible_flight_cards(page, route)
             notes.append(f"cards_encontrados={len(cards)}")
 
             best_vendor = ""
@@ -861,6 +1027,23 @@ class GoogleFlightsScraper:
             if not booking_opened and ranked_cards:
                 fallback = ranked_cards[0]
                 notes.append(f"fallback_primeira_lista={format_brl(fallback.get('price'))}")
+                fallback_airline = self._extract_airline_from_card_text(fallback.get("text", ""))
+                if not fallback_airline:
+                    fallback_airline = self._infer_airline_from_page_text(page)
+                if fallback_airline and fallback.get("price") is not None:
+                    best_vendor = fallback_airline
+                    best_vendor_price = fallback.get("price")
+                    booking_options = [{"vendor": fallback_airline, "price": fallback.get("price")}]
+                    notes.append(f"fallback_card_airline={fallback_airline} ({format_brl(best_vendor_price)})")
+
+            if not ranked_cards:
+                fallback_airline = self._infer_airline_from_page_text(page)
+                fallback_price = self._extract_fallback_price_from_page_text(page)
+                if fallback_airline and fallback_price is not None:
+                    best_vendor = fallback_airline
+                    best_vendor_price = fallback_price
+                    booking_options = [{"vendor": fallback_airline, "price": fallback_price}]
+                    notes.append(f"fallback_page_airline={fallback_airline} ({format_brl(fallback_price)})")
 
             if best_vendor:
                 notes.append(f"melhor_vendedor={best_vendor} ({format_brl(best_vendor_price)})")
@@ -879,21 +1062,13 @@ class GoogleFlightsScraper:
                     f"booking_visible_mismatch={format_brl(best_vendor_price)}!={format_brl(visible_min_price)}"
                 )
 
-            # Regra do usuário: sempre preferir o menor valor visível na busca.
-            # O booking/vendedor fica como detalhe complementar, porque pode refletir
-            # outra etapa do fluxo e não o menor preço mostrado na tela principal.
-            if visible_min_price is not None:
-                final_price = visible_min_price
-                notes.append("final_price_source=visible_list")
-            elif summary_price is not None:
-                final_price = summary_price
-                notes.append("final_price_source=summary_fallback")
-            elif best_vendor_price is not None:
+            # Regra de confiança: considerar preço final no Google Flights
+            # somente quando houver vendedor de companhia aérea no booking.
+            if best_vendor_price is not None and best_vendor:
                 final_price = best_vendor_price
-                notes.append("final_price_source=booking_fallback")
-            elif ranked_cards:
-                final_price = ranked_cards[0].get("price")
-                notes.append("final_price_source=ranked_fallback")
+                notes.append("final_price_source=booking_airline")
+            else:
+                notes.append("final_price_rejected_no_airline_vendor")
 
             if final_price is None:
                 notes.append("Preço não identificado automaticamente.")

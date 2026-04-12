@@ -268,10 +268,11 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
 
 def notify_full_scan(parsed: list[dict], trigger: str = "manual", send_fn=None, max_price: float | None = None) -> None:
     filtered = filter_rows_by_max_price(parsed, max_price)
+    filtered = filter_rows_with_vendor(filtered)
     msg = build_full_scan_message(filtered, trigger=trigger)
     sender = send_fn or send_telegram_message
     try:
-        sender(msg, image_rows=filtered)
+        sender(msg, image_rows=filtered, trigger=trigger)
     except TypeError:
         try:
             sender(msg)
@@ -337,7 +338,73 @@ def _result_to_row(result: FlightResult, price_band: str) -> dict:
 
 
 def _search_google_result(scraper: GoogleFlightsScraper, route: RouteQuery) -> FlightResult:
-    return scraper.search(route)
+    metro_expansions = {
+        "SAO": ["GRU", "CGH", "VCP"],
+        "RIO": ["GIG", "SDU"],
+        "BHZ": ["CNF", "PLU"],
+        "REC": ["REC"],
+        "FOR": ["FOR"],
+        "POA": ["POA"],
+        "NAT": ["NAT"],
+        "JPA": ["JPA"],
+        "MCZ": ["MCZ"],
+        "SSA": ["SSA"],
+        "MAO": ["MAO"],
+        "CWB": ["CWB"],
+        "BSB": ["BSB"],
+        "BEL": ["BEL"],
+        "FLN": ["FLN"],
+        "VIX": ["VIX"],
+        "GYN": ["GYN"],
+        "CGB": ["CGB"],
+        "SLZ": ["SLZ"],
+        "AJU": ["AJU"],
+        "THE": ["THE"],
+        "RBR": ["RBR"],
+    }
+
+    origin_opts = metro_expansions.get(route.origin, [route.origin])
+    destination_opts = metro_expansions.get(route.destination, [route.destination])
+
+    variants: list[tuple[RouteQuery, FlightResult]] = []
+    for origin in origin_opts:
+        for destination in destination_opts:
+            variant = RouteQuery(
+                origin=origin,
+                destination=destination,
+                outbound_date=route.outbound_date,
+                inbound_date=route.inbound_date,
+                trip_type=route.trip_type,
+            )
+            result = scraper.search(variant)
+            variants.append((variant, result))
+
+    def _score(item: tuple[RouteQuery, FlightResult]) -> tuple[int, float]:
+        _variant, result = item
+        has_vendor = 0 if (result.best_vendor or "").strip() else 1
+        price = float(result.price) if isinstance(result.price, (int, float)) else 10**12
+        return (has_vendor, price)
+
+    chosen_variant, chosen = sorted(variants, key=_score)[0]
+    notes_parts = [chosen.notes or ""]
+    notes_parts.append(f"google_variant={chosen_variant.origin}->{chosen_variant.destination}")
+    notes = " | ".join([p for p in notes_parts if p])
+
+    return FlightResult(
+        site=chosen.site,
+        origin=route.origin,
+        destination=route.destination,
+        outbound_date=route.outbound_date,
+        inbound_date=route.inbound_date,
+        trip_type=route.trip_type,
+        price=chosen.price,
+        currency=chosen.currency,
+        url=chosen.url,
+        notes=notes,
+        best_vendor=chosen.best_vendor,
+        best_vendor_price=chosen.best_vendor_price,
+        booking_options_json=chosen.booking_options_json,
+    )
 
 
 def _search_maxmilhas_result(playwright, route: RouteQuery) -> FlightResult | None:
@@ -572,12 +639,14 @@ def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = Tru
         parsed = run_scan_for_routes(routes)
         max_price = get_global_max_price_limit()
         parsed_for_display = filter_rows_by_max_price(parsed, max_price)
+        parsed_for_display = filter_rows_with_vendor(parsed_for_display)
         msg = build_full_scan_message(parsed_for_display, trigger=trigger)
         if notify:
             send_user_telegram_message(
                 user_id,
                 msg if send_text else "",
                 image_rows=parsed_for_display,
+                trigger=trigger,
             )
         total_ok = len([r for r in parsed_for_display if r.get("price") is not None])
         summary = f"ok: {total_ok}/{len(parsed_for_display)} exibidos"
@@ -745,7 +814,14 @@ def _airport_code_color(code: str, default_color: str) -> str:
     return FALLBACK_AIRPORT_COLORS[idx]
 
 
-def build_scan_results_image(rows: list[dict]) -> str | None:
+def _scan_title_from_trigger(trigger: str | None) -> str:
+    normalized = (trigger or "").strip().lower()
+    if "agend" in normalized:
+        return "Consulta agendada completa"
+    return "Consulta manual completa"
+
+
+def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> str | None:
     groups = _group_scan_rows_for_image(rows)
     if not groups:
         return None
@@ -800,7 +876,7 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
 
     x0 = padding_x
     y = padding_y
-    draw.text((x0, y), "Consulta completa", font=title_font, fill=colors["text"])
+    draw.text((x0, y), _scan_title_from_trigger(trigger), font=title_font, fill=colors["text"])
     y += title_h
     draw.text((x0, y), now_local().strftime("%Y-%m-%d %H:%M"), font=small_font, fill=colors["muted"])
     y += meta_h
@@ -887,9 +963,9 @@ def send_telegram_photo_to(image_path: str, caption: str | None = None, token: s
         ).raise_for_status()
 
 
-def send_telegram_message(text: str, image_rows: list[dict] | None = None) -> None:
+def send_telegram_message(text: str, image_rows: list[dict] | None = None, trigger: str | None = None) -> None:
     send_telegram_message_to(text)
-    image_path = build_scan_results_image(image_rows or [])
+    image_path = build_scan_results_image(image_rows or [], trigger=trigger)
     if not image_path:
         return
     try:
@@ -901,7 +977,12 @@ def send_telegram_message(text: str, image_rows: list[dict] | None = None) -> No
             pass
 
 
-def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] | None = None) -> None:
+def send_user_telegram_message(
+    user_id: int,
+    text: str,
+    image_rows: list[dict] | None = None,
+    trigger: str | None = None,
+) -> None:
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     try:
@@ -917,7 +998,7 @@ def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] |
             return
         if (text or "").strip():
             send_telegram_message_to(text, token=token, chat_id=chat_id)
-        image_path = build_scan_results_image(image_rows or [])
+        image_path = build_scan_results_image(image_rows or [], trigger=trigger)
         if not image_path:
             return
         try:
@@ -1002,6 +1083,10 @@ def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[
         row for row in rows
         if row.get("price") is None or float(row["price"]) <= max_price
     ]
+
+
+def filter_rows_with_vendor(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if (row.get("best_vendor") or "").strip()]
 
 
 def get_global_max_price_limit() -> float | None:

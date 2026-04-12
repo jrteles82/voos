@@ -88,6 +88,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Variável obrigatória ausente no .env: {name}")
+    return value
+
+
 def _apply_env_overrides(config: dict) -> dict:
     merged = dict(config)
 
@@ -109,11 +116,23 @@ def _apply_env_overrides(config: dict) -> dict:
 
     if os.getenv("GOOGLE_HEADLESS") is not None:
         merged["headless"] = _env_bool("GOOGLE_HEADLESS", bool(merged.get("headless", True)))
+    if os.getenv("GOOGLE_FLIGHTS_BASE_URL"):
+        merged["google_flights_base_url"] = os.getenv("GOOGLE_FLIGHTS_BASE_URL", "").strip()
+    if os.getenv("GOOGLE_HL"):
+        merged["google_hl"] = os.getenv("GOOGLE_HL", "").strip()
+    if os.getenv("GOOGLE_GL"):
+        merged["google_gl"] = os.getenv("GOOGLE_GL", "").strip()
+    if os.getenv("GOOGLE_CURR"):
+        merged["google_curr"] = os.getenv("GOOGLE_CURR", "").strip()
 
     return merged
 
 CONFIG = dict(DEFAULT_CONFIG)
 CONFIG = _apply_env_overrides(CONFIG)
+CONFIG["google_flights_base_url"] = _env_required("GOOGLE_FLIGHTS_BASE_URL")
+CONFIG["google_hl"] = _env_required("GOOGLE_HL")
+CONFIG["google_gl"] = _env_required("GOOGLE_GL")
+CONFIG["google_curr"] = _env_required("GOOGLE_CURR")
 
 @dataclass
 class RouteQuery:
@@ -368,7 +387,11 @@ def build_google_flights_url(route: RouteQuery) -> str:
         q = f"{route.origin} to {route.destination} {route.outbound_date} one way"
     else:
         q = f"{route.origin} to {route.destination} {route.outbound_date} return {route.inbound_date}"
-    return f"https://www.google.com/travel/flights?q={quote(q)}&hl=pt-BR&gl=BR&curr=BRL"
+    base_url = str(CONFIG["google_flights_base_url"]).rstrip("/")
+    hl = str(CONFIG["google_hl"])
+    gl = str(CONFIG["google_gl"])
+    curr = str(CONFIG["google_curr"])
+    return f"{base_url}?q={quote(q)}&hl={quote(hl)}&gl={quote(gl)}&curr={quote(curr)}"
 
 
 def describe_trip(route: RouteQuery) -> str:

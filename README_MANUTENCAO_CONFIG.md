@@ -78,6 +78,9 @@ Arquivo: `.env`
 - `GOOGLE_HEADLESS` (`1`/`0`)
   - Onde usado: `skyscanner.py` e `main.py` (via `CONFIG`).
   - Para que: execução headless do navegador para Google Flights.
+- `GOOGLE_FLIGHTS_BASE_URL`, `GOOGLE_HL`, `GOOGLE_GL`, `GOOGLE_CURR`
+  - Onde usado: `skyscanner.py`.
+  - Para que: base da URL e parâmetros regionais/moeda do Google Flights.
 - `GOOGLE_TIMEOUT_MS` (default `45000`)
   - Onde usado: `skyscanner.py`.
   - Para que: timeout padrão de operações Playwright no Google Flights.

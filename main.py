@@ -218,8 +218,10 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
             "Sem dados nesta execução."
         )
 
-    idas = [r for r in parsed if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"]
-    voltas = [r for r in parsed if str(r.get("destination", "")).upper() == "PVH"]
+    # Group by direction intelligently based on the first origin if available
+    primary_origin = parsed[0].get("origin", "").upper() if parsed else "PVH"
+    idas = [r for r in parsed if str(r.get("origin", "")).upper() == primary_origin]
+    voltas = [r for r in parsed if str(r.get("destination", "")).upper() == primary_origin]
 
     idas_ok = _dedupe_sorted_rows(sorted([r for r in idas if r.get("price") is not None], key=_price_num))
     voltas_ok = _dedupe_sorted_rows(sorted([r for r in voltas if r.get("price") is not None], key=_price_num))
@@ -228,9 +230,9 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",
         f"Execução: {trigger}",
         "",
-        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, "IDAS (PVH -> destino):", "destination")),
+        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, f"IDAS ({primary_origin} -> destino):", "destination")),
         "",
-        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, "VOLTAS (destino -> PVH):", "origin")),
+        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, f"VOLTAS (destino -> {primary_origin}):", "origin")),
     ]
 
     total_ok = len([r for r in parsed if r.get("price") is not None])
@@ -686,11 +688,12 @@ def _load_font(size: int, bold: bool = False):
 
 
 def _group_scan_rows_for_image(rows: list[dict]) -> list[tuple[str, list[dict]]]:
+    primary_origin = rows[0].get("origin", "").upper() if rows else "PVH"
     idas = [
         r for r in rows
-        if str(r.get("origin", "")).upper() == "PVH" and str(r.get("destination", "")).upper() != "PVH"
+        if str(r.get("origin", "")).upper() == primary_origin
     ]
-    voltas = [r for r in rows if str(r.get("destination", "")).upper() == "PVH"]
+    voltas = [r for r in rows if str(r.get("destination", "")).upper() == primary_origin]
 
     idas_ok = sorted([r for r in idas if r.get("price") is not None], key=lambda r: float(r["price"]))
     voltas_ok = sorted([r for r in voltas if r.get("price") is not None], key=lambda r: float(r["price"]))
@@ -699,7 +702,7 @@ def _group_scan_rows_for_image(rows: list[dict]) -> list[tuple[str, list[dict]]]
     if idas_ok:
         groups.append(("IDAS", idas_ok))
     if voltas_ok:
-        groups.append(("VOLTAS PARA PVH", voltas_ok))
+        groups.append((f"VOLTAS PARA {primary_origin}", voltas_ok))
     return groups
 
 

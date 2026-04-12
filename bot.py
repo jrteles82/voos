@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import uuid
+import requests
 from datetime import datetime
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ForceReply
@@ -30,6 +32,22 @@ PANEL_TEXT = (
     "🖼️ *Manual:* print imediato\n\n"
     "_Escolha uma opção:_"
 )
+def get_panel_text(chat_id: str) -> str:
+    conn = get_db()
+    row = get_bot_user_by_chat(conn, chat_id)
+    if not row:
+        conn.close()
+        return PANEL_TEXT
+    
+    cur = conn.execute('SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1', (row['user_id'],))
+    routes_count = cur.fetchone()[0]
+    conn.close()
+    
+    msg_text = PANEL_TEXT
+    if routes_count == 0:
+        msg_text += "\n\n⚠️ *Atenção:* Você ainda não tem nenhuma rota cadastrada.\nClique em *➕ Adicionar nova rota* abaixo para começar."
+    return msg_text
+
 
 AIRPORT_OPTIONS = [
     ("PVH", "Porto Velho"),
@@ -76,6 +94,7 @@ def load_env(path: Path) -> None:
 
 load_env(ENV_PATH)
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+MP_ACCESS_TOKEN = os.getenv('MP_ACCESS_TOKEN', '').strip()
 
 
 def get_db():
@@ -156,6 +175,22 @@ def ensure_bot_tables() -> None:
         )
         '''
     )
+    cur.execute(
+        '''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mp_payment_id TEXT UNIQUE,
+            chat_id TEXT NOT NULL,
+            plan_name TEXT,
+            amount REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            qr_code TEXT,
+            ticket_url TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            approved_at TEXT
+        )
+        '''
+    )
     for ddl in [
         "ALTER TABLE bot_settings ADD COLUMN enable_google_flights INTEGER DEFAULT 1",
         "ALTER TABLE bot_settings ADD COLUMN enable_maxmilhas INTEGER DEFAULT 0",
@@ -190,6 +225,42 @@ def get_bot_user_by_chat(conn, chat_id: str):
         "SELECT user_id, confirmed, first_name FROM bot_users WHERE chat_id = ?",
         (chat_id,),
     ).fetchone()
+
+
+def create_mp_pix_payment(chat_id: str, plan_name: str, amount: float) -> dict:
+    if not MP_ACCESS_TOKEN:
+        raise RuntimeError('MP_ACCESS_TOKEN não configurado no .env')
+
+    headers = {
+        'Authorization': f'Bearer {MP_ACCESS_TOKEN}',
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': str(uuid.uuid4()),
+    }
+    payload = {
+        'transaction_amount': float(amount),
+        'description': f'Plano {plan_name}',
+        'payment_method_id': 'pix',
+        'external_reference': f'{chat_id}:{plan_name}:{int(datetime.now().timestamp())}',
+        'payer': {
+            'email': f'admin{chat_id}@gmail.com'
+        }
+    }
+    response = requests.post('https://api.mercadopago.com/v1/payments', headers=headers, json=payload, timeout=30)
+    data = response.json()
+    if response.status_code >= 400:
+        raise RuntimeError(data.get('message') or 'Erro ao gerar pagamento Pix')
+    return data
+
+
+def save_payment(conn, mp_payment_id: str, chat_id: str, plan_name: str, amount: float, status: str, qr_code: str, ticket_url: str):
+    conn.execute(
+        '''
+        INSERT OR REPLACE INTO payments (mp_payment_id, chat_id, plan_name, amount, status, qr_code, ticket_url, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ''',
+        (mp_payment_id, chat_id, plan_name, amount, status, qr_code, ticket_url),
+    )
+    conn.commit()
 
 
 def get_user_id_by_chat(conn, chat_id: str):
@@ -374,28 +445,127 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.execute('UPDATE bot_users SET confirmed = 1 WHERE chat_id = ?', (chat_id,))
     ensure_user_settings(conn, int(row['user_id']))
+    
+    cur = conn.execute('SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1', (row['user_id'],))
+    routes_count = cur.fetchone()[0]
+    
     conn.commit()
     conn.close()
 
     await query.edit_message_text('✅ Cadastro confirmado com sucesso!')
+    
+    msg_text = get_panel_text(chat_id)
+
     await query.message.reply_text(
-        PANEL_TEXT,
+        msg_text,
         parse_mode='Markdown',
-        reply_markup=main_menu_markup(),
+        reply_markup=full_menu_markup(),
     )
 
+
+async def cmd_painel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    if chat_id != OWNER_TELEGRAM_ID:
+        await update.message.reply_text('🚫 Comando restrito a administradores.')
+        return
+        
+    await update.message.reply_text(
+        '🛠 *Painel Administrativo*\nBem-vindo, Sr. Junior!',
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('👤 Ver Usuários', callback_data='painel:usuarios')],
+            [InlineKeyboardButton('💰 Ver Vendas', callback_data='painel:vendas')],
+            [InlineKeyboardButton('💳 Gerar Pix (Teste)', callback_data='painel:pix')],
+        ])
+    )
+
+async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    chat_id = str(query.message.chat.id)
+    if chat_id != OWNER_TELEGRAM_ID:
+        await query.answer('Não autorizado', show_alert=True)
+        return
+        
+    action = query.data.split(':', 1)[1]
+    
+    if action == 'usuarios':
+        conn = get_db()
+        users = conn.execute("SELECT user_id, chat_id, first_name, username, confirmed FROM bot_users").fetchall()
+        conn.close()
+        lines = [f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']}) - Confirmado: {u['confirmed']}" for u in users]
+        text = "👤 *Usuários Registrados*\n\n" + ("\n".join(lines) if lines else "_Nenhum_")
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]
+        ]))
+        
+    elif action == 'vendas':
+        conn = get_db()
+        rows = conn.execute("SELECT mp_payment_id, plan_name, amount, status, created_at FROM payments ORDER BY created_at DESC LIMIT 10").fetchall()
+        conn.close()
+        if rows:
+            lines = [f"• {r['plan_name'] or '-'} | R$ {format_money_br(r['amount'])} | {r['status']}" for r in rows]
+            texto = "💰 *Relatório de Vendas*\n\n" + "\n".join(lines)
+        else:
+            texto = "💰 *Relatório de Vendas*\n\n_Nenhum pagamento registrado ainda._"
+        await query.edit_message_text(
+            texto,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]])
+        )
+        
+    elif action == 'pix':
+        conn = get_db()
+        payment = create_mp_pix_payment(chat_id, 'Teste Admin', 1.0)
+        qr_code = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('qr_code', '')
+        ticket_url = payment.get('point_of_interaction', {}).get('transaction_data', {}).get('ticket_url', '')
+        save_payment(conn, str(payment.get('id')), chat_id, 'Teste Admin', 1.0, payment.get('status', 'pending'), qr_code, ticket_url)
+        conn.close()
+        await query.edit_message_text(
+            f"💳 *Pix gerado com sucesso*\n\nValor: R$ 1,00\nID: `{payment.get('id')}`",
+            parse_mode='Markdown'
+        )
+        await query.message.reply_text('PIX COPIA E COLA:')
+        await query.message.reply_text(f"`{qr_code or 'Código Pix indisponível no momento.'}`", parse_mode='Markdown')
+        if ticket_url:
+            await query.message.reply_text(f'LINK PARA PAGAMENTO:\n{ticket_url}')
+        
+        await query.message.reply_text(
+            'Selecione uma opção:',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Voltar ao Painel', callback_data='painel:back')]])
+        )
+        
+    elif action == 'back':
+        await query.edit_message_text(
+            '🛠 *Painel Administrativo*\nBem-vindo, Sr. Junior!',
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('👤 Ver Usuários', callback_data='painel:usuarios')],
+                [InlineKeyboardButton('💰 Ver Vendas', callback_data='painel:vendas')],
+                [InlineKeyboardButton('💳 Gerar Pix (Teste)', callback_data='painel:pix')],
+            ])
+        )
+    
+    await query.answer()
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     conn = get_db()
     msg = require_confirmation(conn, chat_id)
-    conn.close()
+    
     if msg:
+        conn.close()
         await update.message.reply_text(msg, reply_markup=start_markup())
         return
+        
+    row = get_bot_user_by_chat(conn, chat_id)
+    cur = conn.execute('SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1', (row['user_id'],))
+    routes_count = cur.fetchone()[0]
+    conn.close()
+
+    msg_text = get_panel_text(chat_id)
 
     await update.message.reply_text(
-        PANEL_TEXT,
+        msg_text,
         parse_mode='Markdown',
         reply_markup=full_menu_markup(),
     )
@@ -618,7 +788,7 @@ async def addrota_cancel_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     context.user_data.clear()
     await query.edit_message_text('❌ Cadastro de rota cancelado.')
-    await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+    await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=main_menu_markup())
     return ConversationHandler.END
 
 
@@ -696,7 +866,7 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if route_id_str == 'cancel_list':
         conn.close()
         await query.edit_message_text('❌ Remoção cancelada.')
-        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+        await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=main_menu_markup())
         return
     
     if route_id_str.startswith('confirm_'):
@@ -749,7 +919,7 @@ async def removerrota_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     elif route_id_str.startswith('cancel_'):
         conn.close()
         await query.edit_message_text('❌ Remoção cancelada.')
-        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+        await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=main_menu_markup())
         return
 
     route_id = int(route_id_str)
@@ -838,7 +1008,7 @@ async def limite_cancel_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     context.user_data.clear()
     await query.edit_message_text('❌ Ajuste de limite cancelado.')
-    await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=main_menu_markup())
+    await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=main_menu_markup())
     return ConversationHandler.END
 
 
@@ -925,14 +1095,19 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await manual(fake_update, context)
     elif action == 'back':
         await query.answer('Voltando ao menu...')
-        await query.message.reply_text(PANEL_TEXT, parse_mode='Markdown', reply_markup=full_menu_markup())
+        await query.message.reply_text(get_panel_text(str(query.message.chat.id)), parse_mode='Markdown', reply_markup=full_menu_markup())
 
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text('ℹ️ Cadastro cancelado.')
+    chat_id = str(update.message.chat.id)
+    await update.message.reply_text(
+        'ℹ️ Ação cancelada.\n\n' + get_panel_text(chat_id),
+        parse_mode='Markdown',
+        reply_markup=full_menu_markup()
+    )
     return ConversationHandler.END
 
 
@@ -963,6 +1138,7 @@ def main():
     app.add_handler(CommandHandler('minhasrotas', minhas_rotas))
     app.add_handler(CommandHandler('agora', agora))
     app.add_handler(CommandHandler('fontes', fontes))
+    app.add_handler(CommandHandler('painel', cmd_painel))
 
     conv = ConversationHandler(
         entry_points=[CommandHandler('addrota', addrota_start), CallbackQueryHandler(menu_callback, pattern=r'^menu:addrota$')],
@@ -1003,6 +1179,7 @@ def main():
     app.add_handler(CallbackQueryHandler(confirm_callback, pattern=r'^confirm:cadastro$'))
     app.add_handler(CallbackQueryHandler(removerrota_callback, pattern=r'^removerrota:'))
     app.add_handler(CallbackQueryHandler(sources_callback, pattern=r'^sources:'))
+    app.add_handler(CallbackQueryHandler(painel_callback, pattern=r'^painel:'))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:'))
     app.run_polling()
 

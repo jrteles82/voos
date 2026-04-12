@@ -12,8 +12,8 @@ from main import _build_user_routes, build_scan_results_image, run_scan_for_rout
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / '.env'
 DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
-INTERVAL_SECONDS = 180
-SEND_COOLDOWN_SECONDS = 170
+INTERVAL_SECONDS = 1800
+SEND_COOLDOWN_SECONDS = 1700
 
 
 def load_env(path: Path) -> None:
@@ -144,7 +144,7 @@ def main():
         finally:
             conn.close()
 
-        print(f'[bot-scheduler] ciclo concluído em {datetime.now().isoformat()}, aguardando próximo slot de 3 min')
+        print(f'[bot-scheduler] ciclo concluído em {datetime.now().isoformat()}, aguardando próximo slot de 30 min')
         sleep_until_next_slot(INTERVAL_SECONDS)
 
 

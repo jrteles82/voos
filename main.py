@@ -67,8 +67,6 @@ def _env_required(name: str) -> str:
 
 
 TELEGRAM_API_BASE_URL = _env_required("TELEGRAM_API_BASE_URL").rstrip("/")
-BOOTSTRAP_CSS_URL = _env_required("BOOTSTRAP_CSS_URL")
-BOOTSTRAP_ICONS_CSS_URL = _env_required("BOOTSTRAP_ICONS_CSS_URL")
 
 
 DEFAULT_SCAN_INTERVAL = int(CONFIG.get("full_scan_seconds", 3 * 60 * 60))
@@ -1061,7 +1059,7 @@ def index():
 def app_front():
     static_path = Path(app.static_folder or "static") / "index.html"
     html = static_path.read_text(encoding="utf-8")
-    return render_template_string(html, bootstrap_css_url=BOOTSTRAP_CSS_URL)
+    return render_template_string(html)
 
 
 @app.route("/health", methods=["GET"])
@@ -1321,7 +1319,7 @@ def app_page():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>App Consultas</title>
-          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
+          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
         </head>
         <body class='bg-light'>
           <nav class='navbar navbar-dark bg-dark'>
@@ -1336,7 +1334,6 @@ def app_page():
         </body>
         </html>
         """,
-        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 def auth_db_path() -> str:
@@ -1529,7 +1526,7 @@ def auth_register():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Cadastro | VooBot Admin</title>
-          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
+          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
         </head>
         <body class='bg-light d-flex align-items-center' style='min-height:100vh;'>
           <div class='container'>
@@ -1554,7 +1551,6 @@ def auth_register():
         </html>
         """,
         error=error,
-        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 
@@ -1580,7 +1576,7 @@ def auth_login():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Login | VooBot Admin</title>
-          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
+          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
         </head>
         <body class='bg-light d-flex align-items-center' style='min-height:100vh;'>
           <div class='container'>
@@ -1605,7 +1601,6 @@ def auth_login():
         </html>
         """,
         error=error,
-        bootstrap_css_url=BOOTSTRAP_CSS_URL,
     )
 
 
@@ -1651,8 +1646,8 @@ def painel():
           <meta charset='utf-8'>
           <meta name='viewport' content='width=device-width, initial-scale=1'>
           <title>Painel Admin | VooBot</title>
-          <link href='{{ bootstrap_css_url }}' rel='stylesheet'>
-          <link href='{{ bootstrap_icons_css_url }}' rel='stylesheet'>
+          <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+          <link href='https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css' rel='stylesheet'>
           <style>
             body { background:#f4f6f9; }
             .sidebar { min-height: 100vh; background: #343a40; }
@@ -2083,8 +2078,6 @@ def painel():
         default_tg_chat=default_tg_chat,
         airport_options=AIRPORT_OPTIONS,
         restart_command_configured=bool(PANEL_RESTART_COMMAND),
-        bootstrap_css_url=BOOTSTRAP_CSS_URL,
-        bootstrap_icons_css_url=BOOTSTRAP_ICONS_CSS_URL,
     )
 
 

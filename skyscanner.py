@@ -41,10 +41,11 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import quote
+from config import now_local_iso
 
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(__file__).with_name(".playwright-browsers")))
 
@@ -171,7 +172,7 @@ class FlightResult:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_local_iso(sep="T")
 
 
 def format_brl(value: Optional[float]) -> str:

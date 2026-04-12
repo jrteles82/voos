@@ -15,11 +15,12 @@ from access_policy import (
     is_active_access,
     should_charge_user,
 )
-from config import DB_PATH, TOKEN
+from config import DB_PATH, TOKEN, now_local
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
 POLL_SECONDS = int(os.getenv("JOB_WORKER_POLL_SECONDS", "5"))
 CACHE_TTL_SECONDS = int(os.getenv("JOB_WORKER_CACHE_TTL_SECONDS", "600"))
+CACHE_RENDER_VERSION = os.getenv("JOB_WORKER_CACHE_RENDER_VERSION", "2026-04-12-v2")
 
 
 def get_db():
@@ -113,6 +114,7 @@ def get_user_settings(conn, user_id: int):
 
 def build_cache_key(user_id: int, routes, settings) -> str:
     payload = {
+        'render_version': CACHE_RENDER_VERSION,
         'user_id': user_id,
         'routes': [
             {
@@ -149,7 +151,7 @@ def get_cached_image(conn, cache_key: str):
         created_at = datetime.fromisoformat(str(row['created_at']).replace(' ', 'T'))
     except ValueError:
         return None
-    age = (datetime.now() - created_at).total_seconds()
+    age = (now_local() - created_at).total_seconds()
     image_path = row['image_path']
     if age > CACHE_TTL_SECONDS or not os.path.exists(image_path):
         return None

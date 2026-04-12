@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -42,3 +44,14 @@ MP_ACCESS_TOKEN = _env_required("MP_ACCESS_TOKEN")
 TELEGRAM_CHAT_ID = _env_required("TELEGRAM_CHAT_ID")
 TELEGRAM_API_BASE_URL = _env_required("TELEGRAM_API_BASE_URL").rstrip("/")
 MERCADOPAGO_API_BASE_URL = _env_required("MERCADOPAGO_API_BASE_URL").rstrip("/")
+
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "America/Porto_Velho").strip() or "America/Porto_Velho"
+APP_TZ = ZoneInfo(APP_TIMEZONE)
+
+
+def now_local() -> datetime:
+    return datetime.now(APP_TZ).replace(tzinfo=None)
+
+
+def now_local_iso(timespec: str = "seconds", sep: str = " ") -> str:
+    return now_local().isoformat(sep=sep, timespec=timespec)

@@ -227,3 +227,44 @@ WHERE id = 1;
 - Validar permissões de arquivo do banco e `.env`.
 - Em produção, definir `SKYSCANNER_SECRET_KEY` forte.
 - Registrar mudanças de preços/limites/admin em histórico operacional.
+
+## 8) Logs e monitoramento
+
+Se estiver rodando via `systemd`:
+
+- Acompanhar logs em tempo real:
+
+```bash
+sudo journalctl -u skyscanner-bot.service -f
+```
+
+- Ver últimas 200 linhas:
+
+```bash
+sudo journalctl -u skyscanner-bot.service -n 200 --no-pager
+```
+
+- Ver logs de hoje:
+
+```bash
+sudo journalctl -u skyscanner-bot.service --since today --no-pager
+```
+
+- Ver apenas warnings e erros:
+
+```bash
+sudo journalctl -u skyscanner-bot.service -p warning --since today --no-pager
+```
+
+- Filtrar erros comuns em tempo real:
+
+```bash
+sudo journalctl -u skyscanner-bot.service -f | rg -i "erro|error|traceback|exception|warning"
+```
+
+Logs locais úteis no projeto:
+
+```bash
+tail -f /home/teles/dev/python/skyscanner-bot/run_all.log
+tail -f /home/teles/dev/python/skyscanner-bot/main.log
+```

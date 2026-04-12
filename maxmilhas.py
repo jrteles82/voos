@@ -6,6 +6,7 @@ import re
 import time
 import traceback
 from urllib.parse import urlparse
+from config import now_local_iso
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -659,7 +660,7 @@ def _executar_uma_tentativa_com_playwright(
                     "destino": params["destino"],
                     "data_ida": params["data_ida"],
                     "url_final": page.url,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": now_local_iso(sep="T"),
                 }
 
             salvar_debug(page, f"debug_campos_t{tentativa}")
@@ -682,7 +683,7 @@ def _executar_uma_tentativa_com_playwright(
                 "destino": params["destino"],
                 "data_ida": params["data_ida"],
                 "url_final": page.url,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_local_iso(sep="T"),
             }
 
         salvar_debug(page, f"debug_resultados_t{tentativa}", salvar_pagina_html=True)
@@ -698,21 +699,21 @@ def _executar_uma_tentativa_com_playwright(
             "url_final": page.url,
             "precos_encontrados": precos,
             "menor_preco": min(precos) if precos else None,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_local_iso(sep="T"),
         }
 
     except PlaywrightTimeoutError as e:
         return {
             "ok": False,
             "motivo": f"Timeout do Playwright: {e}",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_local_iso(sep="T"),
         }
     except Exception as e:
         traceback.print_exc()
         return {
             "ok": False,
             "motivo": f"Erro inesperado: {e}",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_local_iso(sep="T"),
         }
     finally:
         try:

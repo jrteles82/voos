@@ -19,6 +19,7 @@ from config import (
     TOKEN,
     MP_ACCESS_TOKEN,
     MERCADOPAGO_API_BASE_URL,
+    now_local,
 )
 from access_policy import (
     ensure_policy_schema,
@@ -282,7 +283,7 @@ def get_valid_pending_payment(conn, chat_id: str):
     except ValueError:
         return None
     pix_pending_expiration_hours = get_pix_pending_expiration_hours(conn)
-    if datetime.now() - created_dt > __import__('datetime').timedelta(hours=pix_pending_expiration_hours):
+    if now_local() - created_dt > __import__('datetime').timedelta(hours=pix_pending_expiration_hours):
         return None
     return row
 
@@ -323,7 +324,7 @@ def create_mp_pix_payment(chat_id: str, plan_name: str, amount: float) -> dict:
         'transaction_amount': float(amount),
         'description': f'Plano {plan_name}',
         'payment_method_id': 'pix',
-        'external_reference': f'{chat_id}:{plan_name}:{int(datetime.now().timestamp())}',
+        'external_reference': f'{chat_id}:{plan_name}:{int(now_local().timestamp())}',
         'payer': {
             'email': f'admin{chat_id}@gmail.com'
         }
@@ -361,7 +362,7 @@ def get_mp_payment(payment_id: str) -> dict:
 
 
 def add_days_to_expiration(current_expiration: str | None, days: int) -> str:
-    base = datetime.now()
+    base = now_local()
     if current_expiration:
         try:
             parsed = datetime.fromisoformat(current_expiration)
@@ -963,7 +964,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expires_at = (access['expires_at'] or '').strip()
         if access['status'] == 'active' and expires_at:
             try:
-                if datetime.fromisoformat(expires_at) < datetime.now():
+                if datetime.fromisoformat(expires_at) < now_local():
                     conn.execute("UPDATE user_access SET status = 'expired', updated_at = datetime('now') WHERE chat_id = ?", (chat_id,))
                     conn.commit()
                     access = ensure_user_access(conn, chat_id)

@@ -1,0 +1,7 @@
+nohup: ignorando entrada
+ * Tip: There are .env files present. Install python-dotenv to use them.
+[auto-scan] ligado: intervalo global pelo BD (app_settings.scan_interval_minutes)
+ * Serving Flask app 'main'
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.

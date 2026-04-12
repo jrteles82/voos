@@ -13,7 +13,7 @@ from access_policy import (
     is_active_access,
     should_charge_user as ap_should_charge_user,
 )
-from config import DB_PATH, TOKEN
+from config import DB_PATH, TOKEN, now_local, now_local_iso
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
 _SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
@@ -64,14 +64,14 @@ def was_sent_recently(last_sent_at: str, window_seconds: int = SEND_COOLDOWN_SEC
         dt = datetime.fromisoformat(last_sent_at.replace(' ', 'T'))
     except ValueError:
         return False
-    delta_seconds = (datetime.now() - dt).total_seconds()
+    delta_seconds = (now_local() - dt).total_seconds()
     if delta_seconds < -60:
         return False
     return delta_seconds < window_seconds
 
 
 def mark_sent(conn, user_id: int):
-    now_txt = datetime.now().isoformat(sep=' ', timespec='seconds')
+    now_txt = now_local_iso()
     conn.execute(
         "UPDATE bot_settings SET last_sent_at = ?, updated_at = ? WHERE user_id = ?",
         (now_txt, now_txt, user_id),
@@ -173,7 +173,7 @@ def main():
             conn.close()
 
         print(
-            f"[bot-scheduler] ciclo concluído em {datetime.now().isoformat()}, "
+            f"[bot-scheduler] ciclo concluído em {now_local_iso(sep='T')}, "
             f"aguardando próximo slot de {interval_seconds}s"
         )
         sleep_until_next_slot(interval_seconds)

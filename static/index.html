@@ -268,9 +268,19 @@
         return palette[idx];
       }
 
+      function formatDateDisplay(value) {
+        const txt = String(value || '').trim();
+        if (!txt) return '';
+        const m = txt.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+        const m2 = txt.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
+        return txt;
+      }
+
       function renderFlightDateHtml(outboundDate, inboundDate) {
-        const outbound = safe(outboundDate, '');
-        const inbound = safe(inboundDate, '');
+        const outbound = formatDateDisplay(safe(outboundDate, ''));
+        const inbound = formatDateDisplay(safe(inboundDate, ''));
         const outboundHtml = outbound ? `<span class="badge ${dateBadgeClass(outbound)}">${outbound}</span>` : '-';
         if (!inbound || inbound === '-') return outboundHtml;
         return `${outboundHtml} <span class="text-muted">/</span> <span class="badge ${dateBadgeClass(inbound)}">${inbound}</span>`;
@@ -428,8 +438,6 @@
               ? [...data.resultados]
               : [data.resultado || {}];
 
-            resultados.sort((a, b) => sortByPriceAsc(a, b));
-
             body.innerHTML = resultados.map((r) => {
               const preco = r.price_fmt || 'Sem preço';
               const melhorCompra = (r.best_vendor && String(r.best_vendor).trim())
@@ -480,8 +488,8 @@
             tr.innerHTML = `
               <td>${safe(item.origin)}</td>
               <td>${safe(item.destination)}</td>
-              <td>${safe(item.outbound_date)}</td>
-              <td>${safe(item.inbound_date, '-')}</td>
+              <td>${formatDateDisplay(safe(item.outbound_date))}</td>
+              <td>${formatDateDisplay(safe(item.inbound_date, '-'))}</td>
               <td>${tipo}</td>
             `;
             body.appendChild(tr);
@@ -508,29 +516,10 @@
         const es = new EventSource('/cron-stream');
 
         const renderCronTable = () => {
-          const idas = items.filter((x) => String(x.destination).toUpperCase() !== 'PVH').sort(sortByPriceAsc);
-          const voltas = items.filter((x) => String(x.destination).toUpperCase() === 'PVH').sort(sortByPriceAsc);
+          const ordered = [...items];
 
           const rows = [];
-          if (idas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>IDAS</strong> (menor → maior preço)</td></tr>');
-          for (const item of idas) {
-            const melhorCompra = (item.best_vendor && String(item.best_vendor).trim())
-              ? `${safe(item.best_vendor)} (${safe(formatPrice(item.best_vendor_price), '-')})`
-              : '-';
-            rows.push(`
-<tr>
-<td>${safe(item.origin)} → ${safe(item.destination)}</td>
-<td>${renderFlightDateHtml(item.outbound_date, item.inbound_date)}</td>
-<td class="${priceTextClass(item.price)}">${safe(item.price_fmt, 'Sem preço')}</td>
-<td>${melhorCompra}</td>
-<td>${safe(item.site)}</td>
-<td>${safe(item.final_price_source)}</td>
-<td>${formatDateTimePtBr(new Date().toISOString())}</td>
-</tr>`);
-          }
-
-          if (voltas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>VOLTAS PARA PVH</strong> (menor → maior preço)</td></tr>');
-          for (const item of voltas) {
+          for (const item of ordered) {
             const melhorCompra = (item.best_vendor && String(item.best_vendor).trim())
               ? `${safe(item.best_vendor)} (${safe(formatPrice(item.best_vendor_price), '-')})`
               : '-';
@@ -548,7 +537,6 @@
 
           body.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="7" class="text-center text-muted">Sem resultados nesta execução.</td></tr>';
           highlightBestRows('cron-body', 2);
-          highlightBestReturnToPVHFromRoute('cron-body', 0, 2);
         };
 
         es.onmessage = (evt) => {
@@ -626,32 +614,8 @@
             priceNumber: item.price !== null && item.price !== undefined ? Number(item.price) : null,
           }));
 
-          const idas = mapped.filter((x) => String(x.destination).toUpperCase() !== 'PVH').sort(sortByPriceAsc);
-          const voltas = mapped.filter((x) => String(x.destination).toUpperCase() === 'PVH').sort(sortByPriceAsc);
-
           const rows = [];
-          if (idas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>IDAS</strong> (menor → maior preço)</td></tr>');
-          for (const item of idas) {
-            const rota = `${safe(item.origin)} → ${safe(item.destination)}`;
-            const dataVoo = renderFlightDateHtml(item.outbound_date, item.inbound_date);
-            const preco = item.price !== null && item.price !== undefined ? `R$ ${Number(item.price).toFixed(2).replace('.', ',')}` : 'Sem preço';
-            const melhorCompra = (item.best_vendor && String(item.best_vendor).trim())
-              ? `${safe(item.best_vendor)} (${safe(formatPrice(item.best_vendor_price), '-')})`
-              : '-';
-            rows.push(`
-<tr>
-<td>${rota}</td>
-<td>${dataVoo}</td>
-<td class="${priceTextClass(item.price)}">${preco}</td>
-<td>${melhorCompra}</td>
-<td>${safe(item.site)}</td>
-<td>${safe(item.final_price_source)}</td>
-<td>${formatDateTimePtBr(item.created_at)}</td>
-</tr>`);
-          }
-
-          if (voltas.length) rows.push('<tr class="table-secondary"><td colspan="7"><strong>VOLTAS PARA PVH</strong> (menor → maior preço)</td></tr>');
-          for (const item of voltas) {
+          for (const item of mapped) {
             const rota = `${safe(item.origin)} → ${safe(item.destination)}`;
             const dataVoo = renderFlightDateHtml(item.outbound_date, item.inbound_date);
             const preco = item.price !== null && item.price !== undefined ? `R$ ${Number(item.price).toFixed(2).replace('.', ',')}` : 'Sem preço';
@@ -672,7 +636,6 @@
 
           body.innerHTML = rows.join('');
           highlightBestRows('historico-body', 2);
-          highlightBestReturnToPVHFromRoute('historico-body', 0, 2);
         } catch (e) {
           body.innerHTML = '<tr><td colspan="7" class="text-center text-danger">Erro ao carregar histórico.</td></tr>';
         } finally {

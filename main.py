@@ -47,11 +47,22 @@ CITY_HIGHLIGHT_COLORS = {
     "REC": "#34d399",
     "JPA": "#a855f7",
 }
+
+FALLBACK_AIRPORT_COLORS = [
+    "#2563eb",
+    "#16a34a",
+    "#ea580c",
+    "#7c3aed",
+    "#0891b2",
+    "#be123c",
+    "#0f766e",
+    "#1d4ed8",
+]
 from maxmilhas import (
     buscar_menor_preco as buscar_menor_preco_maxmilhas,
     filtrar_precos_parcelados,
 )
-from config import load_env
+from config import load_env, now_local, now_local_iso
 
 load_env()
 
@@ -163,6 +174,18 @@ def date_color_token(date_iso: str | None) -> tuple[str, str]:
     return palette[sum(digits) % len(palette)]
 
 
+def format_date_display(raw: str | None) -> str:
+    txt = (raw or "").strip()
+    if not txt:
+        return txt
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(txt, fmt).strftime("%d-%m-%Y")
+        except ValueError:
+            continue
+    return txt
+
+
 def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
     def _price_num(row):
         v = row.get("price")
@@ -206,7 +229,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
         section_lines = [section_title]
         for date_idx, date in enumerate(ordered_dates):
             group = grouped[date]
-            header = f"📅 {date}" if date else "📅 data pendente"
+            header = f"📅 {format_date_display(date)}" if date else "📅 data pendente"
             section_lines.append(header)
             for row in group:
                 is_best = best_row is row
@@ -217,7 +240,7 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
                 highlight_value = (row.get(highlight_axis) or "").upper()
                 route_label = f"{row.get('origin')}→{row.get('destination')}"
                 section_lines.append(
-                    f"{route_label} | {color} {row.get('outbound_date')} | {row.get('price_fmt')}{vendor_txt}{best_note}"
+                    f"{route_label} | {color} {format_date_display(row.get('outbound_date'))} | {row.get('price_fmt')}{vendor_txt}{best_note}"
                 )
             if date_idx != len(ordered_dates) - 1:
                 section_lines.append("")
@@ -229,21 +252,13 @@ def build_full_scan_message(parsed: list[dict], trigger: str = "manual") -> str:
             "Sem dados nesta execução."
         )
 
-    # Group by direction intelligently based on the first origin if available
-    primary_origin = parsed[0].get("origin", "").upper() if parsed else "PVH"
-    idas = [r for r in parsed if str(r.get("origin", "")).upper() == primary_origin]
-    voltas = [r for r in parsed if str(r.get("destination", "")).upper() == primary_origin]
-
-    idas_ok = _dedupe_sorted_rows(sorted([r for r in idas if r.get("price") is not None], key=_price_num))
-    voltas_ok = _dedupe_sorted_rows(sorted([r for r in voltas if r.get("price") is not None], key=_price_num))
+    rows = _dedupe_sorted_rows(parsed)
 
     lines = [
         "- ────────── ✈️ CONSULTA COMPLETA ✈️ ────────── -",
         f"Execução: {trigger}",
         "",
-        *(_format_direction(idas_ok, idas_ok[0] if idas_ok else None, f"IDAS ({primary_origin} -> destino):", "destination")),
-        "",
-        *(_format_direction(voltas_ok, voltas_ok[0] if voltas_ok else None, f"VOLTAS (destino -> {primary_origin}):", "origin")),
+        *(_format_direction(rows, rows[0] if rows else None, "ROTAS (ordem de cadastro):", "destination")),
     ]
 
     total_ok = len([r for r in parsed if r.get("price") is not None])
@@ -272,7 +287,7 @@ def _build_user_routes(conn, user_id: int) -> list[RouteQuery]:
         SELECT origin, destination, outbound_date, inbound_date
         FROM user_routes
         WHERE user_id = ? AND active = 1
-        ORDER BY id DESC
+        ORDER BY id ASC
         """,
         (user_id,),
     ).fetchall()
@@ -289,6 +304,16 @@ def _build_user_routes(conn, user_id: int) -> list[RouteQuery]:
             )
         )
     return routes
+
+
+def _routes_for_request_user() -> list[RouteQuery]:
+    user = current_user()
+    if user:
+        conn = get_auth_db()
+        routes = _build_user_routes(conn, int(user["id"]))
+        if routes:
+            return routes
+    return build_db_queries(get_db_path())
 
 
 def _result_to_row(result: FlightResult, price_band: str) -> dict:
@@ -482,14 +507,14 @@ def run_scan_for_routes(routes: list[RouteQuery], on_row=None, sources: dict | N
 def run_full_scan(on_row=None):
     global _scan_last_run_at
     parsed = run_scan_for_routes(build_db_queries(get_db_path()), on_row=on_row)
-    _scan_last_run_at = datetime.now().isoformat()
+    _scan_last_run_at = now_local_iso(sep="T")
     return parsed
 
 
 def _create_user_run(conn, user_id: int, trigger: str = "manual-user") -> int:
     cur = conn.execute(
         "INSERT INTO user_runs (user_id, started_at, status, summary, trigger) VALUES (?, ?, ?, ?, ?)",
-        (user_id, datetime.now().isoformat(), "running", "", trigger),
+        (user_id, now_local_iso(sep="T"), "running", "", trigger),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -498,7 +523,7 @@ def _create_user_run(conn, user_id: int, trigger: str = "manual-user") -> int:
 def _finish_user_run(conn, run_id: int, status: str, summary: str) -> None:
     conn.execute(
         "UPDATE user_runs SET finished_at = ?, status = ?, summary = ? WHERE id = ?",
-        (datetime.now().isoformat(), status, summary, run_id),
+        (now_local_iso(sep="T"), status, summary, run_id),
     )
     conn.commit()
 
@@ -625,32 +650,65 @@ def _load_font(size: int, bold: bool = False):
 
 
 def _group_scan_rows_for_image(rows: list[dict]) -> list[tuple[str, list[dict]]]:
-    primary_origin = rows[0].get("origin", "").upper() if rows else "PVH"
-    idas = [
-        r for r in rows
-        if str(r.get("origin", "")).upper() == primary_origin
-    ]
-    voltas = [r for r in rows if str(r.get("destination", "")).upper() == primary_origin]
-
-    idas_ok = sorted([r for r in idas if r.get("price") is not None], key=lambda r: float(r["price"]))
-    voltas_ok = sorted([r for r in voltas if r.get("price") is not None], key=lambda r: float(r["price"]))
-
-    groups = []
-    if idas_ok:
-        groups.append(("IDAS", idas_ok))
-    if voltas_ok:
-        groups.append((f"VOLTAS PARA {primary_origin}", voltas_ok))
-    return groups
+    return [("ROTAS", rows)] if rows else []
 
 
 def _best_vendor_label(row: dict) -> str:
-    vendor = (row.get("best_vendor") or row.get("site") or "").strip()
+    def _pretty_vendor_name(raw: str) -> str:
+        txt = (raw or "").strip()
+        if not txt:
+            return "N/D"
+        normalized = txt.lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "google_flights": "Google Flights",
+            "google": "Google Flights",
+            "maxmilhas": "MaxMilhas",
+            "latam": "LATAM",
+            "gol": "GOL",
+            "azul": "Azul",
+            "decolar": "Decolar",
+            "zupper": "Zupper",
+            "booking": "Booking.com",
+            "kayak": "KAYAK",
+            "123milhas": "123 Milhas",
+            "123_milhas": "123 Milhas",
+            "viajanet": "ViajaNet",
+            "voeazul": "Azul",
+            "smiles": "Smiles",
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+        return txt.replace("_", " ").strip().title()
+
+    vendor = (row.get("best_vendor") or "").strip()
     if not vendor:
-        vendor = "N/D"
+        raw_booking = row.get("booking_options_json")
+        if isinstance(raw_booking, str) and raw_booking.strip():
+            try:
+                booking_options = json.loads(raw_booking)
+                if isinstance(booking_options, list) and booking_options:
+                    first_vendor = (booking_options[0] or {}).get("vendor")
+                    if isinstance(first_vendor, str):
+                        vendor = first_vendor.strip()
+            except Exception:
+                pass
+    if not vendor:
+        vendor = (row.get("site") or "").strip() or "N/D"
+    vendor_label = _pretty_vendor_name(vendor)
     vendor_price = row.get("best_vendor_price")
     if isinstance(vendor_price, (int, float)):
-        return f"{vendor} ({format_brl(vendor_price)})"
-    return vendor
+        return f"{vendor_label} ({format_brl(vendor_price)})"
+    return vendor_label
+
+
+def _airport_code_color(code: str, default_color: str) -> str:
+    airport = (code or "").strip().upper()
+    if not airport:
+        return default_color
+    if airport in CITY_HIGHLIGHT_COLORS:
+        return CITY_HIGHLIGHT_COLORS[airport]
+    idx = sum(ord(ch) for ch in airport) % len(FALLBACK_AIRPORT_COLORS)
+    return FALLBACK_AIRPORT_COLORS[idx]
 
 
 def build_scan_results_image(rows: list[dict]) -> str | None:
@@ -710,7 +768,7 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
     y = padding_y
     draw.text((x0, y), "Consulta completa", font=title_font, fill=colors["text"])
     y += title_h
-    draw.text((x0, y), datetime.now().strftime("%Y-%m-%d %H:%M"), font=small_font, fill=colors["muted"])
+    draw.text((x0, y), now_local().strftime("%Y-%m-%d %H:%M"), font=small_font, fill=colors["muted"])
     y += meta_h
 
     x = x0
@@ -724,29 +782,27 @@ def build_scan_results_image(rows: list[dict]) -> str | None:
     for group_idx, (title, items) in enumerate(groups):
         section_bg = colors["section_return_bg"] if title.startswith("VOLTAS") else colors["section_bg"]
         draw.rectangle([x0, y, x0 + table_w, y + section_h], fill=section_bg, outline=colors["border"])
-        caption = f"{title} (menor → maior preço)"
+        caption = f"{title} (ordem de cadastro)"
         caption_bbox = draw.textbbox((0, 0), caption, font=header_font)
         caption_width = caption_bbox[2] - caption_bbox[0]
         caption_x = x0 + max(0, int((table_w - caption_width) / 2))
         draw.text((caption_x, y + scaled(7)), caption, font=header_font, fill=colors["text"])
         y += section_h
 
-        highlight_axis = "destination" if title.startswith("IDAS") else "origin"
         for item_idx, row in enumerate(items):
             fill = colors["row_a"] if item_idx % 2 == 0 else colors["row_b"]
             draw.rectangle([x0, y, x0 + table_w, y + row_h], fill=fill, outline=colors["border"])
 
-            origin_txt = row.get('origin', '')
-            destination_txt = row.get('destination', '')
-            highlight_value = (row.get(highlight_axis) or "").upper()
-            highlight_color = CITY_HIGHLIGHT_COLORS.get(highlight_value, colors["text"])
-            destination_label = destination_txt
+            origin_txt = (row.get("origin") or "").upper()
+            destination_txt = (row.get("destination") or "").upper()
+            origin_color = _airport_code_color(origin_txt, colors["text"])
+            destination_color = _airport_code_color(destination_txt, colors["text"])
             origin_part = f"{origin_txt} → "
-            draw.text((x0 + scaled(10), y + scaled(9)), origin_part, font=body_font, fill=colors["text"])
+            draw.text((x0 + scaled(10), y + scaled(9)), origin_part, font=body_font, fill=origin_color)
             dest_x = int(x0 + scaled(10) + draw.textlength(origin_part, font=body_font))
-            draw.text((dest_x, y + scaled(9)), destination_label, font=body_font, fill=highlight_color)
+            draw.text((dest_x, y + scaled(9)), destination_txt, font=body_font, fill=destination_color)
 
-            date_txt = str(row.get("outbound_date") or "")
+            date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
@@ -970,7 +1026,7 @@ def health():
 
 @app.route("/rotas", methods=["GET"])
 def rotas():
-    routes = build_db_queries(get_db_path())
+    routes = _routes_for_request_user()
     return jsonify(
         {
             "count": len(routes),
@@ -1052,8 +1108,8 @@ def consulta():
         resumo = (
             "────────── ✈️ CONSULTA RÁPIDA ✈️ ──────────\n"
             f"Rota: {route.origin} → {route.destination}\n"
-            f"Data: {date_color_token(route.outbound_date)[0]} {route.outbound_date}\n"
-            + (f" / {route.inbound_date}" if route.inbound_date else "")
+            f"Data: {date_color_token(route.outbound_date)[0]} {format_date_display(route.outbound_date)}\n"
+            + (f" / {format_date_display(route.inbound_date)}" if route.inbound_date else "")
             + "\n"
             + "Resultados:\n"
             + "\n".join(detalhes)
@@ -1155,7 +1211,7 @@ def cron_stream():
     def event_stream():
         user = current_user()
         max_price = get_user_max_display_price(int(user["id"])) if user else None
-        routes = build_db_queries(get_db_path())
+        routes = _routes_for_request_user()
         total = sum(2 if not (route.inbound_date or "").strip() else 1 for route in routes)
         yield f"data: {json.dumps({'type': 'start', 'total': total})}\n\n"
 
@@ -1250,7 +1306,7 @@ def get_auth_db():
 
 
 def _current_iso_ts() -> str:
-    return datetime.now().isoformat()
+    return now_local_iso(sep="T")
 
 def _ensure_user_telegram_defaults(conn, user_id: int) -> None:
     exists = conn.execute("SELECT 1 FROM user_telegram WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
@@ -1350,7 +1406,7 @@ def init_auth_tables():
         INSERT OR IGNORE INTO app_settings (id, cron_enabled, scan_interval_minutes, max_price_display, updated_at)
         VALUES (1, 1, ?, NULL, ?)
         """,
-        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), datetime.now().isoformat()),
+        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), now_local_iso(sep="T")),
     )
     cur.execute(
         """
@@ -1360,7 +1416,7 @@ def init_auth_tables():
             updated_at = COALESCE(updated_at, ?)
         WHERE id = 1
         """,
-        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), datetime.now().isoformat()),
+        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), now_local_iso(sep="T")),
     )
 
     db.commit()
@@ -1405,7 +1461,7 @@ def auth_register():
             try:
                 db.execute(
                     "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                    (email, generate_password_hash(password), datetime.now().isoformat()),
+                    (email, generate_password_hash(password), now_local_iso(sep="T")),
                 )
                 db.commit()
                 return redirect(url_for("auth_login"))
@@ -1986,7 +2042,7 @@ def add_route():
             request.form.get("destination", "").strip().upper(),
             request.form.get("outbound_date", "").strip(),
             request.form.get("inbound_date", "").strip(),
-            datetime.now().isoformat(),
+            now_local_iso(sep="T"),
         ),
     )
     db.commit()
@@ -2044,7 +2100,7 @@ def save_telegram():
             user["id"],
             request.form.get("bot_token", "").strip(),
             request.form.get("chat_id", "").strip(),
-            datetime.now().isoformat(),
+            now_local_iso(sep="T"),
         ),
     )
     db.commit()
@@ -2095,7 +2151,7 @@ def save_cron():
           max_price_display = excluded.max_price_display,
           updated_at = excluded.updated_at
         """,
-        (enabled, schedule_minutes, max_price_display, datetime.now().isoformat()),
+        (enabled, schedule_minutes, max_price_display, now_local_iso(sep="T")),
     )
     db.commit()
     return redirect(url_for("painel", _anchor="cron"))

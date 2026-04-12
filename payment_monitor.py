@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import requests
 from telegram import Bot
 
-from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN, MERCADOPAGO_API_BASE_URL
+from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN, MERCADOPAGO_API_BASE_URL, now_local
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("PAYMENT_MONITOR_CHECK_INTERVAL_SECONDS", "20"))
 MP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_MONITOR_MP_TIMEOUT_SECONDS", "30"))
@@ -45,7 +45,7 @@ def plan_days(plan_name: str) -> int:
 
 
 def add_days_to_expiration(current_expiration: str | None, days: int) -> str:
-    base = datetime.now()
+    base = now_local()
     if current_expiration:
         try:
             parsed = datetime.fromisoformat(current_expiration)

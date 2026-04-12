@@ -3,6 +3,7 @@ from datetime import datetime
 
 from config import (
     TELEGRAM_CHAT_ID,
+    now_local,
 )
 
 DEFAULT_AIRPORT_OPTIONS = [
@@ -221,7 +222,7 @@ def is_active_access(access_row) -> bool:
     if not expires_at:
         return False
     try:
-        return datetime.fromisoformat(expires_at) > datetime.now()
+        return datetime.fromisoformat(expires_at) > now_local()
     except ValueError:
         return False
 

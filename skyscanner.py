@@ -98,6 +98,15 @@ def _env_required(name: str) -> str:
 def _apply_env_overrides(config: dict) -> dict:
     merged = dict(config)
 
+    scan_interval_minutes_raw = os.getenv("SCAN_INTERVAL_MINUTES", "").strip()
+    if scan_interval_minutes_raw:
+        try:
+            scan_interval_minutes = max(1, int(scan_interval_minutes_raw))
+            merged["full_scan_seconds"] = scan_interval_minutes * 60
+            merged["schedule_minutes"] = scan_interval_minutes
+        except ValueError:
+            pass
+
     for env_key, config_key, cast in [
         ("GOOGLE_CHECK_EVERY_HOURS", "check_every_hours", int),
         ("GOOGLE_FULL_SCAN_SECONDS", "full_scan_seconds", int),

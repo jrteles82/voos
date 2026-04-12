@@ -16,7 +16,8 @@ from access_policy import (
 from config import DB_PATH, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
-INTERVAL_SECONDS = int(os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", "1800"))
+_SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
+INTERVAL_SECONDS = int(os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", str(max(1, _SCAN_INTERVAL_MINUTES) * 60)))
 SEND_COOLDOWN_SECONDS = int(
     os.getenv("SCHEDULER_SEND_COOLDOWN_SECONDS", str(max(60, INTERVAL_SECONDS - 100)))
 )

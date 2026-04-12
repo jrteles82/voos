@@ -48,16 +48,48 @@ Arquivo: `.env`
   - Quando alterar: sempre em produção.
 - `SKYSCANNER_FULL_SCAN_EVERY_SECONDS`
   - Para que: intervalo global de varredura automática.
+- `SCHEDULER_SEND_COOLDOWN_SECONDS` (default derivado de `SKYSCANNER_FULL_SCAN_EVERY_SECONDS - 100`)
+  - Onde usado: `bot_scheduler.py`.
+  - Para que: janela mínima entre envios para o mesmo usuário.
 - `SKYSCANNER_AUTO_SCAN` (`1`/`0`)
   - Para que: liga/desliga auto scan.
 - `SKYSCANNER_USER_SCAN_POLL_SECONDS`
   - Para que: polling do scheduler de usuário.
+- `JOB_WORKER_POLL_SECONDS` (default `5`)
+  - Onde usado: `job_worker.py`.
+  - Para que: intervalo de polling da fila `scan_jobs`.
+- `JOB_WORKER_CACHE_TTL_SECONDS` (default `600`)
+  - Onde usado: `job_worker.py`.
+  - Para que: TTL do cache de imagens em `scan_cache`.
 - `SKYSCANNER_RESTART_COMMAND`
   - Para que: comando de restart pelo painel.
 - `SKYSCANNER_SCAN_WORKERS`
   - Para que: número de workers de scraping.
 - `SKYSCANNER_USER_DATA_DIR`
   - Para que: diretório de perfil do navegador Playwright.
+- `PAYMENT_MONITOR_CHECK_INTERVAL_SECONDS` (default `20`)
+  - Onde usado: `payment_monitor.py`.
+  - Para que: frequência de varredura de pagamentos pendentes.
+- `PAYMENT_MONITOR_MP_TIMEOUT_SECONDS` (default `30`)
+  - Onde usado: `payment_monitor.py`.
+  - Para que: timeout da consulta na API Mercado Pago.
+- `MAXMILHAS_ORIGEM`, `MAXMILHAS_DESTINO`, `MAXMILHAS_DATA_IDA_ISO`, `MAXMILHAS_URL`
+  - Onde usado: `maxmilhas.py`.
+  - Para que: defaults da execução standalone do scraper.
+- `MAXMILHAS_HEADLESS` (default `1`)
+  - Para que: roda navegador headless no scraper MaxMilhas.
+- `MAXMILHAS_MAX_TENTATIVAS` (default `1`)
+  - Para que: tentativas por rota no scraper MaxMilhas.
+- `MAXMILHAS_TIMEOUT_PADRAO_MS` (default `30000`)
+  - Para que: timeout padrão de operações Playwright no MaxMilhas.
+- `MAXMILHAS_BUSCA_RESULT_TIMEOUT_MS` (default `20000`)
+  - Para que: timeout para detectar resultados na página do MaxMilhas.
+- `MAXMILHAS_MAX_ROTAS_SEGUNDOS` (default `45`)
+  - Para que: limite de tempo por rota no MaxMilhas.
+- `MAXMILHAS_SALVAR_DEBUG` (`1`/`0`)
+  - Para que: salva screenshot/html de debug do MaxMilhas.
+- `MAXMILHAS_LIMPAR_DEBUGS_ANTIGOS` (`1`/`0`)
+  - Para que: remove arquivos antigos de debug do MaxMilhas.
 - `SCAN_IMAGE_MAX_ASPECT`
   - Para que: limite de aspecto da imagem gerada.
 - `SCAN_IMAGE_SCALE`

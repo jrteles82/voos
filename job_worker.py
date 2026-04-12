@@ -18,8 +18,8 @@ from access_policy import (
 from config import DB_PATH, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
-POLL_SECONDS = 5
-CACHE_TTL_SECONDS = 600
+POLL_SECONDS = int(os.getenv("JOB_WORKER_POLL_SECONDS", "5"))
+CACHE_TTL_SECONDS = int(os.getenv("JOB_WORKER_CACHE_TTL_SECONDS", "600"))
 
 
 def get_db():

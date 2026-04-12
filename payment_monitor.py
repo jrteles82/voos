@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -8,7 +9,8 @@ from telegram import Bot
 
 from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN
 
-CHECK_INTERVAL_SECONDS = 20
+CHECK_INTERVAL_SECONDS = int(os.getenv("PAYMENT_MONITOR_CHECK_INTERVAL_SECONDS", "20"))
+MP_REQUEST_TIMEOUT_SECONDS = int(os.getenv("PAYMENT_MONITOR_MP_TIMEOUT_SECONDS", "30"))
 
 
 def get_db():
@@ -22,7 +24,11 @@ def get_mp_payment(payment_id: str) -> dict:
         'Authorization': f'Bearer {MP_ACCESS_TOKEN}',
         'Content-Type': 'application/json',
     }
-    response = requests.get(f'https://api.mercadopago.com/v1/payments/{payment_id}', headers=headers, timeout=30)
+    response = requests.get(
+        f'https://api.mercadopago.com/v1/payments/{payment_id}',
+        headers=headers,
+        timeout=MP_REQUEST_TIMEOUT_SECONDS,
+    )
     data = response.json()
     if response.status_code >= 400:
         raise RuntimeError(data.get('message') or 'Erro ao consultar pagamento Pix')

@@ -6,18 +6,25 @@ import re
 import time
 import traceback
 
-ORIGEM = "PVH"
-DESTINO = "FOR"
-DATA_IDA_ISO = "2026-06-05"
-URL = "https://www.maxmilhas.com.br/passagens-aereas"
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
-HEADLESS = True
-MAX_TENTATIVAS = 1
-TIMEOUT_PADRAO = 30000
-SALVAR_DEBUG = False
-LIMPAR_DEBUGS_ANTIGOS = False
-BUSCA_RESULT_TIMEOUT = 20000  # espera por resultados reais (ms)
-MAX_ROUTAS_SEGUNDOS = 45  # tempo máximo permitido por rota
+
+ORIGEM = os.getenv("MAXMILHAS_ORIGEM", "PVH")
+DESTINO = os.getenv("MAXMILHAS_DESTINO", "FOR")
+DATA_IDA_ISO = os.getenv("MAXMILHAS_DATA_IDA_ISO", "2026-06-05")
+URL = os.getenv("MAXMILHAS_URL", "https://www.maxmilhas.com.br/passagens-aereas")
+
+HEADLESS = _env_bool("MAXMILHAS_HEADLESS", True)
+MAX_TENTATIVAS = int(os.getenv("MAXMILHAS_MAX_TENTATIVAS", "1"))
+TIMEOUT_PADRAO = int(os.getenv("MAXMILHAS_TIMEOUT_PADRAO_MS", "30000"))
+SALVAR_DEBUG = _env_bool("MAXMILHAS_SALVAR_DEBUG", False)
+LIMPAR_DEBUGS_ANTIGOS = _env_bool("MAXMILHAS_LIMPAR_DEBUGS_ANTIGOS", False)
+BUSCA_RESULT_TIMEOUT = int(os.getenv("MAXMILHAS_BUSCA_RESULT_TIMEOUT_MS", "20000"))
+MAX_ROUTAS_SEGUNDOS = int(os.getenv("MAXMILHAS_MAX_ROTAS_SEGUNDOS", "45"))
 RESULT_SELECTORS = [
     "div[data-testid='flight-card']",
     "div[data-testid='flight-list-item']",

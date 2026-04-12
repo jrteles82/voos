@@ -2,12 +2,41 @@ import sqlite3
 from datetime import datetime
 
 from config import (
-    OWNER_TELEGRAM_ID,
-    MAX_ROUTES_DEFAULT,
-    FREE_USES_LIMIT,
-    PIX_PENDING_EXPIRATION_HOURS,
-    AIRPORT_OPTIONS,
+    TELEGRAM_CHAT_ID,
 )
+
+DEFAULT_AIRPORT_OPTIONS = [
+    ("PVH", "Porto Velho"),
+    ("RIO", "Rio de Janeiro"),
+    ("SAO", "São Paulo"),
+    ("BSB", "Brasília"),
+    ("CGB", "Cuiabá"),
+    ("GYN", "Goiânia"),
+    ("MCZ", "Maceió"),
+    ("AJU", "Aracaju"),
+    ("SSA", "Salvador"),
+    ("FOR", "Fortaleza"),
+    ("SLZ", "São Luís"),
+    ("CGR", "Campo Grande"),
+    ("BHZ", "Belo Horizonte"),
+    ("BEL", "Belém"),
+    ("JPA", "João Pessoa"),
+    ("CWB", "Curitiba"),
+    ("REC", "Recife"),
+    ("THE", "Teresina"),
+    ("NAT", "Natal"),
+    ("POA", "Porto Alegre"),
+    ("FLN", "Florianópolis"),
+    ("VIX", "Vitória"),
+    ("MAO", "Manaus"),
+    ("RBR", "Rio Branco"),
+    ("BVB", "Boa Vista"),
+    ("MCP", "Macapá"),
+    ("PMW", "Palmas"),
+]
+DEFAULT_FREE_USES_LIMIT = 20
+DEFAULT_MAX_ROUTES_DEFAULT = 6
+DEFAULT_PIX_PENDING_EXPIRATION_HOURS = 24
 
 
 def ensure_policy_schema(conn: sqlite3.Connection) -> None:
@@ -76,7 +105,11 @@ def ensure_policy_schema(conn: sqlite3.Connection) -> None:
             free_uses_limit, max_routes_default, pix_pending_expiration_hours
         ) VALUES (1, 1, 0, 1, 5, 10, 15, ?, ?, ?)
         """,
-        (FREE_USES_LIMIT, MAX_ROUTES_DEFAULT, PIX_PENDING_EXPIRATION_HOURS),
+        (
+            DEFAULT_FREE_USES_LIMIT,
+            DEFAULT_MAX_ROUTES_DEFAULT,
+            DEFAULT_PIX_PENDING_EXPIRATION_HOURS,
+        ),
     )
     conn.execute(
         """
@@ -86,13 +119,19 @@ def ensure_policy_schema(conn: sqlite3.Connection) -> None:
             pix_pending_expiration_hours = COALESCE(pix_pending_expiration_hours, ?)
         WHERE id = 1
         """,
-        (FREE_USES_LIMIT, MAX_ROUTES_DEFAULT, PIX_PENDING_EXPIRATION_HOURS),
+        (
+            DEFAULT_FREE_USES_LIMIT,
+            DEFAULT_MAX_ROUTES_DEFAULT,
+            DEFAULT_PIX_PENDING_EXPIRATION_HOURS,
+        ),
     )
-    conn.execute(
-        "INSERT OR IGNORE INTO admins (chat_id, active) VALUES (?, 1)",
-        (OWNER_TELEGRAM_ID,),
-    )
-    for idx, (code, name) in enumerate(AIRPORT_OPTIONS, start=1):
+    admins_count = conn.execute("SELECT COUNT(*) AS total FROM admins").fetchone()["total"]
+    if int(admins_count or 0) == 0:
+        conn.execute(
+            "INSERT INTO admins (chat_id, active) VALUES (?, 1)",
+            (TELEGRAM_CHAT_ID,),
+        )
+    for idx, (code, name) in enumerate(DEFAULT_AIRPORT_OPTIONS, start=1):
         conn.execute(
             """
             INSERT OR IGNORE INTO airports (code, name, active, sort_order)
@@ -145,17 +184,19 @@ def get_airport_labels(conn: sqlite3.Connection) -> dict[str, str]:
 
 def get_free_uses_limit(conn: sqlite3.Connection) -> int:
     settings = get_monetization_settings(conn)
-    return int(settings["free_uses_limit"] or FREE_USES_LIMIT)
+    return int(settings["free_uses_limit"] or DEFAULT_FREE_USES_LIMIT)
 
 
 def get_max_routes_default(conn: sqlite3.Connection) -> int:
     settings = get_monetization_settings(conn)
-    return int(settings["max_routes_default"] or MAX_ROUTES_DEFAULT)
+    return int(settings["max_routes_default"] or DEFAULT_MAX_ROUTES_DEFAULT)
 
 
 def get_pix_pending_expiration_hours(conn: sqlite3.Connection) -> int:
     settings = get_monetization_settings(conn)
-    return int(settings["pix_pending_expiration_hours"] or PIX_PENDING_EXPIRATION_HOURS)
+    return int(
+        settings["pix_pending_expiration_hours"] or DEFAULT_PIX_PENDING_EXPIRATION_HOURS
+    )
 
 
 def ensure_user_access(conn: sqlite3.Connection, chat_id: str):

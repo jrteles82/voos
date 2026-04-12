@@ -7,7 +7,7 @@ Este documento centraliza **todas as configurações possíveis** do projeto, co
 
 ## 1) Mapa rápido de configuração
 
-- `.env`: segredos, caminho do banco e seed inicial de políticas.
+- `.env`: segredos e parâmetros de infraestrutura/execução.
 - `flight_tracker_browser.db` (SQLite): regras dinâmicas de negócio (admin, limites, monetização, usuários, cron, pagamentos).
 - `skyscanner-config.json`: comportamento de busca e monitoramento de voos.
 - `main.py` via variáveis de ambiente `SKYSCANNER_*` e `SCAN_IMAGE_*`: tuning operacional do painel web/API.
@@ -15,7 +15,7 @@ Este documento centraliza **todas as configurações possíveis** do projeto, co
 ## 2) Ordem de precedência (importante)
 
 - Políticas de acesso (`admins`, `free_uses_limit`, `max_routes_default`, `pix_pending_expiration_hours`) são lidas do **banco**.
-- O `.env` é usado como valor inicial (seed/fallback de migração) em `access_policy.py`.
+- O `.env` não é mais a fonte dessas políticas no dia a dia.
 - Config de scraping vem de `skyscanner-config.json` (com alguns fallbacks para env no `main.py`).
 
 ## 3) Configuração no `.env`
@@ -37,19 +37,6 @@ Arquivo: `.env`
 - `MP_ACCESS_TOKEN`
   - Para que: integração Mercado Pago (PIX).
   - Quando alterar: rotação de credencial.
-- `OWNER_TELEGRAM_ID`
-  - Para que: seed do primeiro admin na tabela `admins`.
-  - Quando alterar: apenas bootstrap inicial de ambiente.
-- `MAX_ROUTES_DEFAULT`
-  - Para que: seed inicial do limite padrão de rotas.
-  - Quando alterar: bootstrap de ambiente novo.
-- `FREE_USES_LIMIT`
-  - Para que: seed inicial de usos grátis.
-  - Quando alterar: bootstrap de ambiente novo.
-- `PIX_PENDING_EXPIRATION_HOURS`
-  - Para que: seed inicial de validade de PIX pendente.
-  - Quando alterar: bootstrap de ambiente novo.
-
 ### 3.2 Opcionais (operação)
 
 - `PAYMENT_WEBHOOK_PORT` (default `8787`)
@@ -189,7 +176,7 @@ Quando alterar:
 - Ambiente novo (primeiro deploy)
   - Ajustar `.env` completo.
   - Subir serviços (`run_all.py` ou `systemd`).
-  - Validar seed no banco (`admins` e `monetization_settings`).
+  - Validar bootstrap no banco (`admins` e `monetization_settings`).
 - Mudança comercial (planos/limites)
   - Alterar direto no banco em `monetization_settings`.
 - Troca de admin
@@ -212,4 +199,3 @@ Quando alterar:
 - Validar permissões de arquivo do banco e `.env`.
 - Em produção, definir `SKYSCANNER_SECRET_KEY` forte.
 - Registrar mudanças de preços/limites/admin em histórico operacional.
-

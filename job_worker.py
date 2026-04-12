@@ -8,7 +8,14 @@ from datetime import datetime
 
 from telegram import Bot
 
-from config import DB_PATH, FREE_USES_LIMIT, TOKEN
+from access_policy import (
+    ensure_policy_schema,
+    ensure_user_access,
+    get_free_uses_limit,
+    is_active_access,
+    should_charge_user,
+)
+from config import DB_PATH, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
 POLL_SECONDS = 5
@@ -188,7 +195,8 @@ def process_job(conn, bot: Bot, job):
     charge_now = should_charge_user(conn, chat_id, access) and not is_active_access(access)
     if charge_now:
         free_uses = int(access['free_uses'] or 0)
-        if free_uses >= FREE_USES_LIMIT:
+        free_uses_limit = get_free_uses_limit(conn)
+        if free_uses >= free_uses_limit:
             raise RuntimeError('bloqueado_por_monetizacao')
 
     cache_key = build_cache_key(user_id, routes, settings)
@@ -246,6 +254,7 @@ def main():
     while True:
         conn = get_db()
         try:
+            ensure_policy_schema(conn)
             ensure_job_tables(conn)
             job = fetch_next_job(conn)
             if not job:

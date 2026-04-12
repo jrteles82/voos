@@ -6,7 +6,14 @@ from datetime import datetime
 
 from telegram import Bot
 
-from config import DB_PATH, FREE_USES_LIMIT, OWNER_TELEGRAM_ID, TOKEN
+from access_policy import (
+    ensure_policy_schema,
+    ensure_user_access,
+    get_free_uses_limit,
+    is_active_access,
+    should_charge_user as ap_should_charge_user,
+)
+from config import DB_PATH, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
 INTERVAL_SECONDS = 1800
@@ -19,46 +26,8 @@ def get_db():
     return conn
 
 
-def ensure_user_access(conn, chat_id: str):
-    conn.execute(
-        '''
-        INSERT OR IGNORE INTO user_access (chat_id, status, free_uses, test_charge, total_paid, updated_at)
-        VALUES (?, 'free', 0, 0, 0, datetime('now'))
-        ''',
-        (chat_id,)
-    )
-    conn.commit()
-    return conn.execute('SELECT * FROM user_access WHERE chat_id = ?', (chat_id,)).fetchone()
-
-
-def get_monetization_settings(conn):
-    row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
-    return row
-
-
 def should_charge_user(conn, chat_id: str, access_row) -> bool:
-    settings = get_monetization_settings(conn)
-    if not settings:
-        return False
-    if chat_id == OWNER_TELEGRAM_ID:
-        return bool(int(settings['charge_admin_only']) or int(access_row['test_charge'] or 0) or int(settings['charge_global']))
-    if int(settings['charge_admin_only']) == 1:
-        return False
-    return bool(int(settings['charge_global']) or int(access_row['test_charge'] or 0))
-
-
-def is_active_access(access_row) -> bool:
-    if not access_row:
-        return False
-    if (access_row['status'] or '') != 'active':
-        return False
-    expires_at = (access_row['expires_at'] or '').strip()
-    if not expires_at:
-        return False
-    try:
-        return datetime.fromisoformat(expires_at) > datetime.now()
-    except ValueError:
-        return False
+    return ap_should_charge_user(conn, chat_id, access_row)
 
 
 def iter_users(conn):
@@ -104,7 +73,8 @@ def run_for_user(conn, bot: Bot, user_id: int, chat_id: str, max_price: float, s
     charge_now = should_charge_user(conn, chat_id, access) and not is_active_access(access)
     if charge_now:
         free_uses = int(access['free_uses'] or 0)
-        if free_uses >= FREE_USES_LIMIT:
+        free_uses_limit = get_free_uses_limit(conn)
+        if free_uses >= free_uses_limit:
             return False, 'bloqueado_por_monetizacao'
 
     routes = _build_user_routes(conn, user_id)
@@ -158,6 +128,7 @@ def main():
     while True:
         conn = get_db()
         try:
+            ensure_policy_schema(conn)
             users = iter_users(conn)
             for user in users:
                 try:

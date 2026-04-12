@@ -15,15 +15,23 @@ from telegram.ext import (
 )
 from config import (
     DB_PATH,
-    OWNER_TELEGRAM_ID,
-    MAX_ROUTES_DEFAULT,
-    FREE_USES_LIMIT,
-    PIX_PENDING_EXPIRATION_HOURS,
     PANEL_TEXT,
-    AIRPORT_OPTIONS,
-    AIRPORT_LABELS,
     TOKEN,
     MP_ACCESS_TOKEN,
+)
+from access_policy import (
+    ensure_policy_schema,
+    get_monetization_settings as ap_get_monetization_settings,
+    ensure_user_access as ap_ensure_user_access,
+    is_active_access as ap_is_active_access,
+    should_charge_user as ap_should_charge_user,
+    is_admin_chat,
+    list_active_admin_chat_ids,
+    get_free_uses_limit,
+    get_max_routes_default,
+    get_pix_pending_expiration_hours,
+    list_airports,
+    get_airport_labels,
 )
 
 
@@ -74,6 +82,19 @@ def format_date_br(raw: str) -> str:
 
 def format_money_br(value: float) -> str:
     return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _load_airport_labels() -> dict[str, str]:
+    conn = get_db()
+    try:
+        return get_airport_labels(conn)
+    finally:
+        conn.close()
+
+
+def airport_label(code: str) -> str:
+    labels = _load_airport_labels()
+    return labels.get((code or "").upper(), code)
 
 
 def ensure_bot_tables() -> None:
@@ -140,32 +161,7 @@ def ensure_bot_tables() -> None:
         )
         '''
     )
-    cur.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS monetization_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            test_mode INTEGER DEFAULT 1,
-            charge_global INTEGER DEFAULT 0,
-            charge_admin_only INTEGER DEFAULT 1,
-            weekly_price REAL DEFAULT 5,
-            biweekly_price REAL DEFAULT 10,
-            monthly_price REAL DEFAULT 15
-        )
-        '''
-    )
-    cur.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS user_access (
-            chat_id TEXT PRIMARY KEY,
-            status TEXT DEFAULT 'free',
-            expires_at TEXT,
-            free_uses INTEGER DEFAULT 0,
-            test_charge INTEGER DEFAULT 0,
-            total_paid REAL DEFAULT 0,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        '''
-    )
+    ensure_policy_schema(conn)
     for ddl in [
         "ALTER TABLE bot_settings ADD COLUMN enable_google_flights INTEGER DEFAULT 1",
         "ALTER TABLE bot_settings ADD COLUMN enable_maxmilhas INTEGER DEFAULT 0",
@@ -175,59 +171,35 @@ def ensure_bot_tables() -> None:
             cur.execute(ddl)
         except sqlite3.OperationalError:
             pass
-    cur.execute(
-        '''
-        INSERT OR IGNORE INTO monetization_settings (
-            id, test_mode, charge_global, charge_admin_only, weekly_price, biweekly_price, monthly_price
-        ) VALUES (1, 1, 0, 1, 5, 10, 15)
-        '''
-    )
     conn.commit()
     conn.close()
 
 
 def get_monetization_settings(conn):
-    row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
-    if row is None:
-        conn.execute(
-            'INSERT OR IGNORE INTO monetization_settings (id, test_mode, charge_global, charge_admin_only, weekly_price, biweekly_price, monthly_price) VALUES (1, 1, 0, 1, 5, 10, 15)'
-        )
-        conn.commit()
-        row = conn.execute('SELECT * FROM monetization_settings WHERE id = 1').fetchone()
-    return row
+    return ap_get_monetization_settings(conn)
 
 
 def ensure_user_access(conn, chat_id: str):
-    conn.execute(
-        '''
-        INSERT OR IGNORE INTO user_access (chat_id, status, free_uses, test_charge, total_paid, updated_at)
-        VALUES (?, 'free', 0, 0, 0, datetime('now'))
-        ''',
-        (chat_id,)
-    )
-    conn.commit()
-    return conn.execute('SELECT * FROM user_access WHERE chat_id = ?', (chat_id,)).fetchone()
+    return ap_ensure_user_access(conn, chat_id)
 
 
 def ensure_owner_test_access(conn):
-    access = ensure_user_access(conn, OWNER_TELEGRAM_ID)
     settings = get_monetization_settings(conn)
     desired_test = 1 if int(settings['test_mode']) == 1 else 0
-    if int(access['test_charge'] or 0) != desired_test:
+    admin_chat_ids = list_active_admin_chat_ids(conn)
+    for admin_chat_id in admin_chat_ids:
+        access = ensure_user_access(conn, admin_chat_id)
+        if int(access['test_charge'] or 0) == desired_test:
+            continue
         conn.execute(
-            'UPDATE user_access SET test_charge = ?, updated_at = datetime(\'now\') WHERE chat_id = ?',
-            (desired_test, OWNER_TELEGRAM_ID)
+            "UPDATE user_access SET test_charge = ?, updated_at = datetime('now') WHERE chat_id = ?",
+            (desired_test, admin_chat_id),
         )
         conn.commit()
 
 
 def should_charge_user(conn, chat_id: str, access_row) -> bool:
-    settings = get_monetization_settings(conn)
-    if chat_id == OWNER_TELEGRAM_ID:
-        return bool(int(settings['charge_admin_only']) or int(access_row['test_charge'] or 0) or int(settings['charge_global']))
-    if int(settings['charge_admin_only']) == 1:
-        return False
-    return bool(int(settings['charge_global']) or int(access_row['test_charge'] or 0))
+    return ap_should_charge_user(conn, chat_id, access_row)
 
 
 def plan_catalog(settings_row):
@@ -261,7 +233,8 @@ def plan_days(plan_name: str) -> int:
 def offer_paid_plans_text(conn, chat_id: str) -> str:
     access = ensure_user_access(conn, chat_id)
     settings = get_monetization_settings(conn)
-    block_text = '⏰ Seu acesso venceu. Escolha um plano para renovar.' if (access['status'] or '') == 'expired' else f'🚫 Seus {FREE_USES_LIMIT} usos grátis acabaram.'
+    free_uses_limit = get_free_uses_limit(conn)
+    block_text = '⏰ Seu acesso venceu. Escolha um plano para renovar.' if (access['status'] or '') == 'expired' else f'🚫 Seus {free_uses_limit} usos grátis acabaram.'
     weekly, biweekly, monthly = plan_catalog(settings)
     return (
         f"{block_text}\n\n"
@@ -284,17 +257,7 @@ def user_payments_markup(rows) -> InlineKeyboardMarkup:
 
 
 def is_active_access(access_row) -> bool:
-    if not access_row:
-        return False
-    if (access_row['status'] or '') != 'active':
-        return False
-    expires_at = (access_row['expires_at'] or '').strip()
-    if not expires_at:
-        return False
-    try:
-        return datetime.fromisoformat(expires_at) > datetime.now()
-    except ValueError:
-        return False
+    return ap_is_active_access(access_row)
 
 
 def get_valid_pending_payment(conn, chat_id: str):
@@ -317,7 +280,8 @@ def get_valid_pending_payment(conn, chat_id: str):
         created_dt = datetime.fromisoformat(created_at.replace(' ', 'T'))
     except ValueError:
         return None
-    if datetime.now() - created_dt > __import__('datetime').timedelta(hours=PIX_PENDING_EXPIRATION_HOURS):
+    pix_pending_expiration_hours = get_pix_pending_expiration_hours(conn)
+    if datetime.now() - created_dt > __import__('datetime').timedelta(hours=pix_pending_expiration_hours):
         return None
     return row
 
@@ -516,7 +480,13 @@ def full_menu_markup(chat_id: str | None = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton('💳 Meus pagamentos', callback_data='menu:pagamentos')],
         [InlineKeyboardButton('ℹ️ Ajuda e instruções', callback_data='menu:manual')],
     ]
-    if str(chat_id or '') == OWNER_TELEGRAM_ID:
+    if chat_id:
+        conn = get_db()
+        admin = is_admin_chat(conn, str(chat_id))
+        conn.close()
+    else:
+        admin = False
+    if admin:
         keyboard.append([InlineKeyboardButton('🛠 Painel', callback_data='menu:adminpainel')])
     return InlineKeyboardMarkup(keyboard)
 
@@ -570,9 +540,15 @@ def pending_payment_markup(payment_id: str) -> InlineKeyboardMarkup:
 
 
 def airport_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    conn = get_db()
+    try:
+        options = list_airports(conn)
+    finally:
+        conn.close()
+
     buttons = []
     row = []
-    for code, name in AIRPORT_OPTIONS:
+    for code, name in options:
         row.append(InlineKeyboardButton(f'{code} — {name}', callback_data=f'{prefix}:{code}'))
         if len(row) == 2:
             buttons.append(row)
@@ -699,11 +675,12 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_painel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    if chat_id != OWNER_TELEGRAM_ID:
+    conn = get_db()
+    if not is_admin_chat(conn, chat_id):
+        conn.close()
         await update.message.reply_text('🚫 Comando restrito a administradores.')
         return
 
-    conn = get_db()
     ensure_owner_test_access(conn)
     settings = get_monetization_settings(conn)
     conn.close()
@@ -724,14 +701,14 @@ async def cmd_painel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = str(query.message.chat.id)
-    if chat_id != OWNER_TELEGRAM_ID:
+    conn = get_db()
+    if not is_admin_chat(conn, chat_id):
+        conn.close()
         await query.answer('Não autorizado', show_alert=True)
         return
 
     parts = query.data.split(':')
     action = parts[1] if len(parts) > 1 else ''
-
-    conn = get_db()
     ensure_owner_test_access(conn)
 
     if query.data.startswith('userpix:'):
@@ -784,6 +761,7 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == 'usuarios':
+        free_uses_limit = get_free_uses_limit(conn)
         users = conn.execute(
             """
             SELECT b.user_id, b.chat_id, b.first_name, b.username, b.confirmed,
@@ -794,7 +772,7 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
         ).fetchall()
         lines = [
-            f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']})\n  Confirmado: {u['confirmed']} | Status: {u['status'] or 'free'} | Vencimento: {u['expires_at'] or '-'} | Grátis: {int(u['free_uses'] or 0)}/{FREE_USES_LIMIT} | Total pago: R$ {format_money_br(u['total_paid'] or 0)}"
+            f"• {u['first_name'] or 'Sem nome'} (chat: {u['chat_id']})\n  Confirmado: {u['confirmed']} | Status: {u['status'] or 'free'} | Vencimento: {u['expires_at'] or '-'} | Grátis: {int(u['free_uses'] or 0)}/{free_uses_limit} | Total pago: R$ {format_money_br(u['total_paid'] or 0)}"
             for u in users
         ]
         text = "👤 *Usuários Registrados*\n\n" + ("\n\n".join(lines) if lines else "_Nenhum_")
@@ -842,7 +820,12 @@ async def painel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = get_monetization_settings(conn)
         novo = 0 if int(settings['test_mode']) == 1 else 1
         conn.execute('UPDATE monetization_settings SET test_mode = ? WHERE id = 1', (novo,))
-        conn.execute('UPDATE user_access SET test_charge = ?, updated_at = datetime(\'now\') WHERE chat_id = ?', (novo, OWNER_TELEGRAM_ID))
+        for admin_chat_id in list_active_admin_chat_ids(conn):
+            ensure_user_access(conn, admin_chat_id)
+            conn.execute(
+                "UPDATE user_access SET test_charge = ?, updated_at = datetime('now') WHERE chat_id = ?",
+                (novo, admin_chat_id),
+            )
         conn.commit()
         settings = get_monetization_settings(conn)
         texto = (
@@ -1059,8 +1042,8 @@ async def minhas_rotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '',
     ]
     for idx, row in enumerate(rows, start=1):
-        origem = AIRPORT_LABELS.get(row['origin'], row['origin'])
-        destino = AIRPORT_LABELS.get(row['destination'], row['destination'])
+        origem = airport_label(row['origin'])
+        destino = airport_label(row['destination'])
         linhas.append(f'*Rota {idx}*')
         linhas.append(f'🛫 {origem} → {destino}')
         linhas.append(f'📅 Ida: {format_date_br(row["outbound_date"])}')
@@ -1128,7 +1111,6 @@ async def sources_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addrota_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    telegram_user_id = str(update.effective_user.id)
     conn = get_db()
     msg = require_confirmation(conn, chat_id)
     if msg:
@@ -1141,10 +1123,12 @@ async def addrota_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'SELECT COUNT(*) FROM user_routes WHERE user_id = ? AND active = 1',
         (user_id,),
     ).fetchone()[0]
+    max_routes_default = get_max_routes_default(conn)
+    admin = is_admin_chat(conn, chat_id)
     conn.close()
 
-    if telegram_user_id != OWNER_TELEGRAM_ID and total_rotas >= MAX_ROUTES_DEFAULT:
-        await update.message.reply_text('⚠️ Você atingiu o limite de 4 rotas ativas.')
+    if (not admin) and total_rotas >= max_routes_default:
+        await update.message.reply_text(f'⚠️ Você atingiu o limite de {max_routes_default} rotas ativas.')
         return ConversationHandler.END
 
     context.user_data.clear()
@@ -1203,7 +1187,7 @@ async def _save_route_with_inbound(update: Update, context: ContextTypes.DEFAULT
     conn.close()
 
     await msg_target.reply_text(
-        f"✅ *Rota cadastrada*\n{AIRPORT_LABELS.get(context.user_data['origin'], context.user_data['origin'])} → {AIRPORT_LABELS.get(context.user_data['destination'], context.user_data['destination'])} | {format_date_br(context.user_data['outbound_date'])}" +
+        f"✅ *Rota cadastrada*\n{airport_label(context.user_data['origin'])} → {airport_label(context.user_data['destination'])} | {format_date_br(context.user_data['outbound_date'])}" +
         (f" | {format_date_br(inbound_date)}" if inbound_date else ''),
         parse_mode='Markdown',
         reply_markup=main_menu_markup(),
@@ -1229,7 +1213,7 @@ async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer('Agora selecione o destino para continuar.', show_alert=True)
         context.user_data['origin'] = code
         await query.edit_message_text(
-            f"✅ Origem: {AIRPORT_LABELS.get(code, code)}\n\nEscolha o destino:",
+            f"✅ Origem: {airport_label(code)}\n\nEscolha o destino:",
             reply_markup=airport_keyboard('destino'),
         )
         return ASK_DESTINATION
@@ -1238,7 +1222,7 @@ async def aeroporto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer('Digite a data de ida no chat para finalizar.', show_alert=True)
         context.user_data['destination'] = code
         await query.edit_message_text(
-            f"✅ Destino: {AIRPORT_LABELS.get(code, code)}\n\nData de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD",
+            f"✅ Destino: {airport_label(code)}\n\nData de ida? Envie em DD/MM/AAAA ou YYYY/MM/DD",
             reply_markup=cancel_markup('addrota:cancel', '❌ Cancelar cadastro de rota'),
         )
         await query.message.reply_text(
@@ -1399,7 +1383,8 @@ async def agora(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if should_charge and not is_active_access(access):
         free_uses = int(access['free_uses'] or 0)
-        if free_uses >= FREE_USES_LIMIT:
+        free_uses_limit = get_free_uses_limit(conn)
+        if free_uses >= free_uses_limit:
             texto = offer_paid_plans_text(conn, chat_id)
             conn.close()
             await update.message.reply_text(texto, parse_mode='Markdown', reply_markup=user_plan_markup())
@@ -1615,7 +1600,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text('💳 Você ainda não tem pagamentos registrados.', reply_markup=full_menu_markup(chat_id))
     elif action == 'adminpainel':
         await query.answer('Abrindo painel...')
-        if chat_id != OWNER_TELEGRAM_ID:
+        conn = get_db()
+        admin = is_admin_chat(conn, chat_id)
+        conn.close()
+        if not admin:
             await query.message.reply_text('🚫 Comando restrito a administradores.')
             return ConversationHandler.END
         fake_update = Update(update.update_id, message=query.message)

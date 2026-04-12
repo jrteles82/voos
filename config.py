@@ -3,7 +3,6 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
-DB_PATH = BASE_DIR / "flight_tracker_browser.db"
 
 
 def load_env(path: Path = ENV_PATH) -> None:
@@ -19,10 +18,27 @@ def load_env(path: Path = ENV_PATH) -> None:
 
 load_env()
 
-OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID", "1748352987").strip() or "1748352987"
-MAX_ROUTES_DEFAULT = int(os.getenv("MAX_ROUTES_DEFAULT", "6"))
-FREE_USES_LIMIT = int(os.getenv("FREE_USES_LIMIT", "20"))
-PIX_PENDING_EXPIRATION_HOURS = int(os.getenv("PIX_PENDING_EXPIRATION_HOURS", "24"))
+
+def _env_required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Variável obrigatória ausente no .env: {name}")
+    return value
+
+
+def _env_required_int(name: str) -> int:
+    raw = _env_required(name)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"Variável {name} deve ser inteira. Valor recebido: {raw!r}") from exc
+
+
+DB_PATH = Path(_env_required("DB_PATH"))
+OWNER_TELEGRAM_ID = _env_required("OWNER_TELEGRAM_ID")
+MAX_ROUTES_DEFAULT = _env_required_int("MAX_ROUTES_DEFAULT")
+FREE_USES_LIMIT = _env_required_int("FREE_USES_LIMIT")
+PIX_PENDING_EXPIRATION_HOURS = _env_required_int("PIX_PENDING_EXPIRATION_HOURS")
 
 PANEL_DIVIDER = "──────────────────────────"
 PANEL_TEXT = (
@@ -64,6 +80,6 @@ AIRPORT_OPTIONS = [
 ]
 AIRPORT_LABELS = {code: f"{code} — {name}" for code, name in AIRPORT_OPTIONS}
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", OWNER_TELEGRAM_ID).strip() or OWNER_TELEGRAM_ID
+TOKEN = _env_required("TELEGRAM_BOT_TOKEN")
+MP_ACCESS_TOKEN = _env_required("MP_ACCESS_TOKEN")
+TELEGRAM_CHAT_ID = _env_required("TELEGRAM_CHAT_ID")

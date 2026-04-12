@@ -559,20 +559,26 @@ def _user_has_running_scan(conn, user_id: int) -> bool:
     return bool(row)
 
 
-def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True):
+def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = True, send_text: bool = False):
     conn = sqlite3.connect(auth_db_path())
     conn.row_factory = sqlite3.Row
     run_id = _create_user_run(conn, user_id, trigger=trigger)
     try:
         routes = _build_user_routes(conn, user_id)
         if not routes:
-            routes = build_db_queries(get_db_path())
+            summary = "sem rotas ativas"
+            _finish_user_run(conn, run_id, "ok", summary)
+            return {"status": "ok", "summary": summary, "parsed": []}
         parsed = run_scan_for_routes(routes)
         max_price = get_global_max_price_limit()
         parsed_for_display = filter_rows_by_max_price(parsed, max_price)
         msg = build_full_scan_message(parsed_for_display, trigger=trigger)
         if notify:
-            send_user_telegram_message(user_id, msg, image_rows=parsed_for_display)
+            send_user_telegram_message(
+                user_id,
+                msg if send_text else "",
+                image_rows=parsed_for_display,
+            )
         total_ok = len([r for r in parsed_for_display if r.get("price") is not None])
         summary = f"ok: {total_ok}/{len(parsed_for_display)} exibidos"
         _finish_user_run(conn, run_id, "ok", summary)
@@ -589,13 +595,41 @@ def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = Tru
 def _auto_scan_loop():
     while True:
         try:
-            enabled, interval_minutes, max_price = get_scheduler_settings()
+            enabled, interval_minutes, _max_price = get_scheduler_settings()
             if enabled != 1:
                 time.sleep(max(30, USER_SCAN_POLL_SECONDS))
                 continue
-            parsed = run_full_scan()
-            notify_full_scan(parsed, trigger="agendada", max_price=max_price)
-            print(f"[auto-scan] consulta completa executada em {_scan_last_run_at}")
+
+            auth_conn = sqlite3.connect(auth_db_path())
+            auth_conn.row_factory = sqlite3.Row
+            try:
+                user_rows = auth_conn.execute(
+                    """
+                    SELECT DISTINCT user_id
+                    FROM user_routes
+                    WHERE active = 1
+                    ORDER BY user_id ASC
+                    """
+                ).fetchall()
+                user_ids = [int(row["user_id"]) for row in user_rows]
+            finally:
+                auth_conn.close()
+
+            sent_count = 0
+            for user_id in user_ids:
+                try:
+                    result = run_user_scan(
+                        user_id,
+                        trigger="agendada",
+                        notify=True,
+                        send_text=False,
+                    )
+                    if result.get("parsed"):
+                        sent_count += 1
+                except Exception as user_exc:
+                    print(f"[auto-scan] erro no usuário {user_id}: {user_exc}")
+
+            print(f"[auto-scan] consulta agendada executada para {len(user_ids)} usuários; envios com resultado: {sent_count}")
         except Exception as e:
             print(f"[auto-scan] erro: {e}")
         _, interval_minutes, _ = get_scheduler_settings()
@@ -881,7 +915,8 @@ def send_user_telegram_message(user_id: int, text: str, image_rows: list[dict] |
         chat_id = (row["chat_id"] or "").strip()
         if not token or not chat_id:
             return
-        send_telegram_message_to(text, token=token, chat_id=chat_id)
+        if (text or "").strip():
+            send_telegram_message_to(text, token=token, chat_id=chat_id)
         image_path = build_scan_results_image(image_rows or [])
         if not image_path:
             return

@@ -1,9 +1,7 @@
-import os
 import sqlite3
 import uuid
 import requests
 from datetime import datetime
-from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ForceReply
 from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 from telegram.ext import (
@@ -15,25 +13,22 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from config import (
+    DB_PATH,
+    OWNER_TELEGRAM_ID,
+    MAX_ROUTES_DEFAULT,
+    FREE_USES_LIMIT,
+    PIX_PENDING_EXPIRATION_HOURS,
+    PANEL_TEXT,
+    AIRPORT_OPTIONS,
+    AIRPORT_LABELS,
+    TOKEN,
+    MP_ACCESS_TOKEN,
+)
 
-
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / '.env'
-DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 
 ASK_ORIGIN, ASK_DESTINATION, ASK_OUTBOUND, ASK_LIMIT = range(4)
-OWNER_TELEGRAM_ID = "1748352987"
-MAX_ROUTES_DEFAULT = 6
-FREE_USES_LIMIT = 20
-PIX_PENDING_EXPIRATION_HOURS = 24
-PANEL_DIVIDER = "──────────────────────────"
-PANEL_TEXT = (
-    "✈️ *Painel de Controle*\n"
-    f"{PANEL_DIVIDER}\n"
-    "🤖 *Automático:* buscas a cada 30 min\n"
-    "🖼️ *Manual:* print imediato\n\n"
-    "_Escolha uma opção:_"
-)
+
 def get_panel_text(chat_id: str) -> str:
     conn = get_db()
     row = get_bot_user_by_chat(conn, chat_id)
@@ -49,54 +44,6 @@ def get_panel_text(chat_id: str) -> str:
     if routes_count == 0:
         msg_text += "\n\n⚠️ *Atenção:* Você ainda não tem nenhuma rota cadastrada.\nClique em *➕ Adicionar nova rota* abaixo para começar."
     return msg_text
-
-
-AIRPORT_OPTIONS = [
-    ("PVH", "Porto Velho"),
-    ("RIO", "Rio de Janeiro"),
-    ("SAO", "São Paulo"),
-    ("BSB", "Brasília"),
-    ("CGB", "Cuiabá"),
-    ("GYN", "Goiânia"),
-    ("MCZ", "Maceió"),
-    ("AJU", "Aracaju"),
-    ("SSA", "Salvador"),
-    ("FOR", "Fortaleza"),
-    ("SLZ", "São Luís"),
-    ("CGR", "Campo Grande"),
-    ("BHZ", "Belo Horizonte"),
-    ("BEL", "Belém"),
-    ("JPA", "João Pessoa"),
-    ("CWB", "Curitiba"),
-    ("REC", "Recife"),
-    ("THE", "Teresina"),
-    ("NAT", "Natal"),
-    ("POA", "Porto Alegre"),
-    ("FLN", "Florianópolis"),
-    ("VIX", "Vitória"),
-    ("MAO", "Manaus"),
-    ("RBR", "Rio Branco"),
-    ("BVB", "Boa Vista"),
-    ("MCP", "Macapá"),
-    ("PMW", "Palmas"),
-]
-AIRPORT_LABELS = {code: f"{code} — {name}" for code, name in AIRPORT_OPTIONS}
-
-
-def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        os.environ.setdefault(key.strip(), value.strip())
-
-
-load_env(ENV_PATH)
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-MP_ACCESS_TOKEN = os.getenv('MP_ACCESS_TOKEN', '').strip()
 
 
 def get_db():

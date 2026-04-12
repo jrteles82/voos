@@ -5,32 +5,14 @@ import os
 import sqlite3
 import time
 from datetime import datetime
-from pathlib import Path
 
 from telegram import Bot
 
+from config import DB_PATH, FREE_USES_LIMIT, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / '.env'
-DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
 POLL_SECONDS = 5
 CACHE_TTL_SECONDS = 600
-
-
-def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        os.environ.setdefault(key.strip(), value.strip())
-
-
-load_env(ENV_PATH)
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 
 
 def get_db():

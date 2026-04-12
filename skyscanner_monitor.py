@@ -49,6 +49,7 @@ from urllib.parse import quote
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(__file__).with_name(".playwright-browsers")))
 
 import requests
+from config import DB_PATH, TELEGRAM_CHAT_ID, TOKEN
 
 try:
     from playwright.sync_api import Browser, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -79,9 +80,9 @@ DEFAULT_CONFIG = {
     "timeout_ms": 45000,
     "settle_seconds": 2,
     "request_pause_seconds": 0.2,
-    "db_path": str(Path(__file__).with_name("flight_tracker_browser.db")),
-    "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN", "8651349481:AAHRdUKl7Dx-GJ76Yy_kQiJ4jA6TCaQ8r4g"),
-    "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID", "1748352987"),
+    "db_path": str(DB_PATH),
+    "telegram_bot_token": TOKEN,
+    "telegram_chat_id": TELEGRAM_CHAT_ID,
     "price_alert_brl": 1800.0,
     "drop_alert_percent": 8.0,
     "target_site": "google_flights",

@@ -1,34 +1,14 @@
 import asyncio
-import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import requests
 from telegram import Bot
 
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / '.env'
-DB_PATH = BASE_DIR / 'flight_tracker_browser.db'
+from config import DB_PATH, MP_ACCESS_TOKEN, TOKEN
+
 CHECK_INTERVAL_SECONDS = 20
-OWNER_TELEGRAM_ID = '1748352987'
-
-
-def load_env(path: Path) -> None:
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        os.environ.setdefault(key.strip(), value.strip())
-
-
-load_env(ENV_PATH)
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-MP_ACCESS_TOKEN = os.getenv('MP_ACCESS_TOKEN', '').strip()
 
 
 def get_db():

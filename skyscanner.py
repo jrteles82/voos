@@ -64,15 +64,7 @@ except ImportError as exc:
     ) from exc
 
 
-CONFIG_FILE = Path(__file__).with_name("skyscanner-config.json")
-
 DEFAULT_CONFIG = {
-    "origin": "PVH",
-    "destinations_br": ["JPA", "REC", "NAT"],
-    "destinations_sa": [],
-    "enable_south_america": False,
-    "outbound_dates": ["2026-06-04", "2026-06-05"],
-    "inbound_dates": ["2026-06-15", "2026-06-16"],
     "check_every_hours": 3,
     "full_scan_seconds": 10800,
     "schedule_minutes": 180,
@@ -89,14 +81,6 @@ DEFAULT_CONFIG = {
 }
 
 
-def _normalize_list(value):
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, list):
-        return value
-    return []
-
-
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -104,31 +88,8 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _env_list(name: str):
-    value = os.getenv(name, "").strip()
-    if not value:
-        return None
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
 def _apply_env_overrides(config: dict) -> dict:
     merged = dict(config)
-
-    if os.getenv("GOOGLE_ORIGIN"):
-        merged["origin"] = os.getenv("GOOGLE_ORIGIN", "").strip().upper()
-
-    for env_key, config_key in [
-        ("GOOGLE_DESTINATIONS_BR", "destinations_br"),
-        ("GOOGLE_DESTINATIONS_SA", "destinations_sa"),
-        ("GOOGLE_OUTBOUND_DATES", "outbound_dates"),
-        ("GOOGLE_INBOUND_DATES", "inbound_dates"),
-    ]:
-        env_list = _env_list(env_key)
-        if env_list is not None:
-            merged[config_key] = env_list
-
-    if os.getenv("GOOGLE_ENABLE_SOUTH_AMERICA") is not None:
-        merged["enable_south_america"] = _env_bool("GOOGLE_ENABLE_SOUTH_AMERICA", bool(merged.get("enable_south_america", False)))
 
     for env_key, config_key, cast in [
         ("GOOGLE_CHECK_EVERY_HOURS", "check_every_hours", int),
@@ -151,28 +112,7 @@ def _apply_env_overrides(config: dict) -> dict:
 
     return merged
 
-
-def _load_user_config():
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        with CONFIG_FILE.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        return {}
-
-    normalized = {}
-    array_keys = {"destinations_br", "destinations_sa", "outbound_dates", "inbound_dates"}
-    for key, value in payload.items():
-        if key in array_keys:
-            normalized[key] = _normalize_list(value)
-        else:
-            normalized[key] = value
-    return normalized
-
-
 CONFIG = dict(DEFAULT_CONFIG)
-CONFIG.update(_load_user_config())
 CONFIG = _apply_env_overrides(CONFIG)
 
 @dataclass
@@ -326,41 +266,6 @@ class Database:
         avg_price = float(row["avg_price"]) if row and row["avg_price"] is not None else None
         last_price = float(last["price"]) if last and last["price"] is not None else None
         return min_price, avg_price, last_price
-
-
-def build_config_queries() -> List[RouteQuery]:
-    destinations = list(CONFIG["destinations_br"])
-    if CONFIG["enable_south_america"]:
-        destinations.extend(CONFIG["destinations_sa"])
-
-    queries: List[RouteQuery] = []
-    seen = set()
-    for dest in destinations:
-        for outbound in CONFIG["outbound_dates"]:
-            key = (CONFIG["origin"], dest, outbound, "", "oneway")
-            if key not in seen:
-                seen.add(key)
-                queries.append(
-                    RouteQuery(
-                        origin=CONFIG["origin"],
-                        destination=dest,
-                        outbound_date=outbound,
-                        trip_type="oneway",
-                    )
-                )
-        for inbound in CONFIG["inbound_dates"]:
-            key = (dest, CONFIG["origin"], inbound, "", "oneway")
-            if key not in seen:
-                seen.add(key)
-                queries.append(
-                    RouteQuery(
-                        origin=dest,
-                        destination=CONFIG["origin"],
-                        outbound_date=inbound,
-                        trip_type="oneway",
-                    )
-                )
-    return queries
 
 
 def build_db_routes_from_rows(rows):
@@ -1004,6 +909,9 @@ class Monitor:
 
     def run_once(self) -> List[FlightResult]:
         routes = build_queries()
+        if not routes:
+            print("[coleta] nenhuma rota ativa em user_routes; nada para coletar")
+            return []
         results: List[FlightResult] = []
 
         with sync_playwright() as p:
@@ -1102,4 +1010,4 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-build_queries = build_config_queries
+build_queries = build_db_queries

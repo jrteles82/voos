@@ -9,14 +9,13 @@ Este documento centraliza **todas as configurações possíveis** do projeto, co
 
 - `.env`: segredos e parâmetros de infraestrutura/execução.
 - `flight_tracker_browser.db` (SQLite): regras dinâmicas de negócio (admin, limites, monetização, usuários, cron, pagamentos).
-- `skyscanner-config.json`: comportamento de busca e monitoramento de voos.
 - `main.py` via variáveis de ambiente `SKYSCANNER_*` e `SCAN_IMAGE_*`: tuning operacional do painel web/API.
 
 ## 2) Ordem de precedência (importante)
 
 - Políticas de acesso (`admins`, `free_uses_limit`, `max_routes_default`, `pix_pending_expiration_hours`) são lidas do **banco**.
 - O `.env` não é mais a fonte dessas políticas no dia a dia.
-- Config de scraping vem de `skyscanner-config.json` (com alguns fallbacks para env no `main.py`).
+- Rotas de consulta vêm exclusivamente do banco (`user_routes`).
 
 ## 3) Configuração no `.env`
 
@@ -76,18 +75,6 @@ Arquivo: `.env`
 - `MAXMILHAS_ORIGEM`, `MAXMILHAS_DESTINO`, `MAXMILHAS_DATA_IDA_ISO`, `MAXMILHAS_URL`
   - Onde usado: `maxmilhas.py`.
   - Para que: defaults da execução standalone do scraper.
-- `GOOGLE_ORIGIN`
-  - Onde usado: `skyscanner.py`.
-  - Para que: origem padrão do Google Flights.
-- `GOOGLE_DESTINATIONS_BR`, `GOOGLE_DESTINATIONS_SA` (CSV)
-  - Onde usado: `skyscanner.py`.
-  - Para que: destinos monitorados no Google Flights.
-- `GOOGLE_OUTBOUND_DATES`, `GOOGLE_INBOUND_DATES` (CSV de datas `YYYY-MM-DD`)
-  - Onde usado: `skyscanner.py`.
-  - Para que: datas consultadas no Google Flights.
-- `GOOGLE_ENABLE_SOUTH_AMERICA` (`1`/`0`)
-  - Onde usado: `skyscanner.py`.
-  - Para que: ativa destinos da América do Sul no Google Flights.
 - `GOOGLE_HEADLESS` (`1`/`0`)
   - Onde usado: `skyscanner.py` e `main.py` (via `CONFIG`).
   - Para que: execução headless do navegador para Google Flights.
@@ -199,38 +186,7 @@ SET weekly_price = 7,
 WHERE id = 1;
 ```
 
-## 5) Configuração em `skyscanner-config.json`
-
-Arquivo: `skyscanner-config.json`
-
-Chaves usadas:
-- `origin`
-  - Para que: aeroporto base.
-- `destinations_br`, `destinations_sa`
-  - Para que: destinos monitorados.
-- `enable_south_america`
-  - Para que: inclui destinos da América do Sul.
-- `outbound_dates`, `inbound_dates`
-  - Para que: datas consultadas.
-- `check_every_hours`, `full_scan_seconds`, `schedule_minutes`
-  - Para que: cadência de execução.
-- `headless`, `timeout_ms`, `settle_seconds`, `request_pause_seconds`
-  - Para que: estabilidade/performance do scraper.
-- `maxmilhas_min_price`, `maxmilhas_final_price_threshold`
-  - Para que: filtro e preço final no MaxMilhas.
-- `scan_workers` (opcional)
-  - Para que: paralelismo de varredura.
-- `price_alert_brl`, `drop_alert_percent` (se usados)
-  - Para que: critérios de alerta.
-- `db_path`, `telegram_bot_token`, `telegram_chat_id` (podem existir)
-  - Para que: fallback local para alguns fluxos.
-
-Quando alterar:
-- mudança de estratégia de busca
-- mudança de datas/destinos
-- tuning de performance
-
-## 6) O que configurar em cada cenário
+## 5) O que configurar em cada cenário
 
 - Ambiente novo (primeiro deploy)
   - Ajustar `.env` completo.
@@ -241,17 +197,17 @@ Quando alterar:
 - Troca de admin
   - Alterar tabela `admins` no banco.
 - Ajuste de scraping/monitoramento
-  - Alterar `skyscanner-config.json`.
+  - Alterar variáveis de ambiente de runtime (`GOOGLE_*`, `SKYSCANNER_*`, `SCAN_IMAGE_*`) e/ou rotas no banco (`user_routes`).
 - Rotação de segredos
   - Alterar `.env` (`TELEGRAM_BOT_TOKEN`, `MP_ACCESS_TOKEN`, `SKYSCANNER_SECRET_KEY`) e reiniciar processos.
 
-## 7) Reinício após mudanças
+## 6) Reinício após mudanças
 
 - Se usa `run_all.py`, reinicie o processo principal.
 - Se usa `systemd`, reinicie o serviço baseado em `skyscanner-bot.service.example`.
 - Mudanças em banco geralmente têm efeito imediato, mas é recomendado reiniciar workers para consistência.
 
-## 8) Checklist de segurança e operação
+## 7) Checklist de segurança e operação
 
 - Nunca commitar `.env` com tokens reais.
 - Manter backup periódico de `flight_tracker_browser.db`.

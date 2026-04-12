@@ -27,7 +27,6 @@ from skyscanner import (
     FlightResult,
     GoogleFlightsScraper,
     RouteQuery,
-    build_config_queries,
     build_db_queries,
     classify_price,
     format_brl,
@@ -1335,17 +1334,6 @@ def get_auth_db():
 def _current_iso_ts() -> str:
     return datetime.now().isoformat()
 
-def _ensure_user_routes_defaults(conn, user_id: int) -> None:
-    exists = conn.execute("SELECT 1 FROM user_routes WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
-    if exists:
-        return
-    now = _current_iso_ts()
-    for route in build_config_queries():
-        conn.execute("INSERT INTO user_routes (user_id, origin, destination, outbound_date, inbound_date, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            (user_id, route.origin, route.destination, route.outbound_date, route.inbound_date or "", now),
-        )
-    conn.commit()
-
 def _ensure_user_telegram_defaults(conn, user_id: int) -> None:
     exists = conn.execute("SELECT 1 FROM user_telegram WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
     if exists:
@@ -1372,7 +1360,6 @@ def _ensure_user_cron_defaults(conn, user_id: int) -> None:
     conn.commit()
 
 def ensure_user_defaults(conn, user_id: int) -> None:
-    _ensure_user_routes_defaults(conn, user_id)
     _ensure_user_telegram_defaults(conn, user_id)
     _ensure_user_cron_defaults(conn, user_id)
 

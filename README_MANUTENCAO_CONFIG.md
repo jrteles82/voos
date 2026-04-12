@@ -36,6 +36,9 @@ Arquivo: `.env`
 - `MP_ACCESS_TOKEN`
   - Para que: integração Mercado Pago (PIX).
   - Quando alterar: rotação de credencial.
+- `TELEGRAM_API_BASE_URL`
+  - Para que: base da API Telegram (envio de mensagens/fotos).
+  - Quando alterar: proxy/gateway da API Telegram.
 ### 3.2 Opcionais (operação)
 
 - `PAYMENT_WEBHOOK_PORT` (default `8787`)

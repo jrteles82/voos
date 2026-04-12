@@ -133,6 +133,7 @@ CONFIG["google_flights_base_url"] = _env_required("GOOGLE_FLIGHTS_BASE_URL")
 CONFIG["google_hl"] = _env_required("GOOGLE_HL")
 CONFIG["google_gl"] = _env_required("GOOGLE_GL")
 CONFIG["google_curr"] = _env_required("GOOGLE_CURR")
+CONFIG["telegram_api_base_url"] = _env_required("TELEGRAM_API_BASE_URL").rstrip("/")
 
 @dataclass
 class RouteQuery:
@@ -358,7 +359,7 @@ def send_telegram_message(text: str) -> None:
         print("[alerta] Telegram não configurado")
         print(text)
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    url = f"{CONFIG['telegram_api_base_url']}/bot{token}/sendMessage"
     resp = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=30)
     resp.raise_for_status()
 

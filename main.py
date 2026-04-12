@@ -54,6 +54,7 @@ from maxmilhas import (
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.getenv("SKYSCANNER_SECRET_KEY", "dev-change-this-secret")
+TELEGRAM_API_BASE_URL = os.getenv("TELEGRAM_API_BASE_URL", "").strip().rstrip("/")
 
 
 DEFAULT_SCAN_INTERVAL = int(CONFIG.get("full_scan_seconds", 3 * 60 * 60))
@@ -668,7 +669,8 @@ def send_telegram_message_to(text: str, token: str | None = None, chat_id: str |
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id:
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    base_url = TELEGRAM_API_BASE_URL or "https://api.telegram.org"
+    url = f"{base_url}/bot{token}/sendMessage"
     requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=20).raise_for_status()
 
 
@@ -848,7 +850,8 @@ def send_telegram_photo_to(image_path: str, caption: str | None = None, token: s
     chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID") or CONFIG.get("telegram_chat_id")
     if not token or not chat_id or not image_path or not os.path.exists(image_path):
         return
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    base_url = TELEGRAM_API_BASE_URL or "https://api.telegram.org"
+    url = f"{base_url}/bot{token}/sendPhoto"
     with open(image_path, "rb") as image_file:
         requests.post(
             url,

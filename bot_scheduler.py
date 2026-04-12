@@ -17,9 +17,8 @@ from config import DB_PATH, TOKEN
 from main import _build_user_routes, build_scan_results_image, run_scan_for_routes, filter_rows_by_max_price
 
 _SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
-INTERVAL_SECONDS = int(os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", str(max(1, _SCAN_INTERVAL_MINUTES) * 60)))
 SEND_COOLDOWN_SECONDS = int(
-    os.getenv("SCHEDULER_SEND_COOLDOWN_SECONDS", str(max(60, INTERVAL_SECONDS - 100)))
+    os.getenv("SCHEDULER_SEND_COOLDOWN_SECONDS", str(max(60, max(1, _SCAN_INTERVAL_MINUTES) * 60 - 100)))
 )
 
 
@@ -27,6 +26,15 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_scan_interval_seconds(conn) -> int:
+    row = conn.execute(
+        "SELECT scan_interval_minutes FROM app_settings WHERE id = 1"
+    ).fetchone()
+    if row and row["scan_interval_minutes"] is not None:
+        return max(60, int(row["scan_interval_minutes"]) * 60)
+    return max(60, max(1, _SCAN_INTERVAL_MINUTES) * 60)
 
 
 def should_charge_user(conn, chat_id: str, access_row) -> bool:
@@ -129,9 +137,11 @@ def main():
 
     bot = Bot(token=TOKEN)
     while True:
+        interval_seconds = max(60, max(1, _SCAN_INTERVAL_MINUTES) * 60)
         conn = get_db()
         try:
             ensure_policy_schema(conn)
+            interval_seconds = get_scan_interval_seconds(conn)
             users = iter_users(conn)
             for user in users:
                 try:
@@ -164,9 +174,9 @@ def main():
 
         print(
             f"[bot-scheduler] ciclo concluído em {datetime.now().isoformat()}, "
-            f"aguardando próximo slot de {INTERVAL_SECONDS}s"
+            f"aguardando próximo slot de {interval_seconds}s"
         )
-        sleep_until_next_slot(INTERVAL_SECONDS)
+        sleep_until_next_slot(interval_seconds)
 
 
 if __name__ == '__main__':

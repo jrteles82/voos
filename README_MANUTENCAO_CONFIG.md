@@ -8,8 +8,8 @@ Este documento centraliza **todas as configurações possíveis** do projeto, co
 ## 1) Mapa rápido de configuração
 
 - `.env`: segredos e parâmetros de infraestrutura/execução.
-- `flight_tracker_browser.db` (SQLite): regras dinâmicas de negócio (admin, limites, monetização, usuários, cron, pagamentos).
-- `main.py` via variáveis de ambiente `SKYSCANNER_*` e `SCAN_IMAGE_*`: tuning operacional do painel web/API.
+- `flight_tracker_browser.db` (SQLite): regras dinâmicas de negócio (admin, limites, monetização, usuários, cron global, pagamentos).
+- `main.py` via variáveis de ambiente `SKYSCANNER_*`, `GOOGLE_*` e `SCAN_IMAGE_*`: tuning operacional do painel web/API.
 
 ## 2) Ordem de precedência (importante)
 
@@ -48,15 +48,11 @@ Arquivo: `.env`
 - `SKYSCANNER_SECRET_KEY` (default inseguro de dev)
   - Onde usado: sessão Flask em `main.py`.
   - Quando alterar: sempre em produção.
-- `SKYSCANNER_FULL_SCAN_EVERY_SECONDS`
-  - Para que: intervalo global de varredura automática.
-- `SCHEDULER_SEND_COOLDOWN_SECONDS` (default derivado de `SKYSCANNER_FULL_SCAN_EVERY_SECONDS - 100`)
+- `SCHEDULER_SEND_COOLDOWN_SECONDS` (default derivado de `30min - 100s`)
   - Onde usado: `bot_scheduler.py`.
   - Para que: janela mínima entre envios para o mesmo usuário.
 - `SKYSCANNER_AUTO_SCAN` (`1`/`0`)
   - Para que: liga/desliga auto scan.
-- `SKYSCANNER_USER_SCAN_POLL_SECONDS`
-  - Para que: polling do scheduler de usuário.
 - `JOB_WORKER_POLL_SECONDS` (default `5`)
   - Onde usado: `job_worker.py`.
   - Para que: intervalo de polling da fila `scan_jobs`.
@@ -95,7 +91,7 @@ Arquivo: `.env`
   - Para que: pausa entre consultas para reduzir pressão no site.
 - `GOOGLE_CHECK_EVERY_HOURS`, `GOOGLE_FULL_SCAN_SECONDS`, `GOOGLE_SCHEDULE_MINUTES`
   - Onde usado: `skyscanner.py`/`main.py` (via `CONFIG`).
-  - Para que: cadência de execução automática.
+  - Para que: cadência do scraper Google/compatibilidade legada.
 - `MAXMILHAS_HEADLESS` (default `1`)
   - Para que: roda navegador headless no scraper MaxMilhas.
 - `MAXMILHAS_MAX_TENTATIVAS` (default `1`)
@@ -155,8 +151,19 @@ Banco: `DB_PATH` (normalmente `flight_tracker_browser.db`)
   - Para que: trilha dos PIX gerados/aprovados.
 - `scan_jobs`, `scan_cache`
   - Para que: fila de consulta manual e cache de imagem.
-- `users`, `user_routes`, `user_telegram`, `user_cron`, `user_runs`
-  - Para que: painel web, rotas, telegram por usuário e agenda.
+- `users`, `user_routes`, `user_telegram`, `user_runs`, `app_settings`
+  - Para que: painel web, rotas, telegram por usuário, histórico de execuções e cron global.
+
+Configuração de cron global no banco:
+
+```sql
+UPDATE app_settings
+SET cron_enabled = 1,
+    scan_interval_minutes = 60,
+    max_price_display = NULL,
+    updated_at = datetime('now')
+WHERE id = 1;
+```
 
 ### 4.3 Alterações comuns no banco (exemplos)
 
@@ -203,7 +210,7 @@ WHERE id = 1;
 - Troca de admin
   - Alterar tabela `admins` no banco.
 - Ajuste de scraping/monitoramento
-  - Alterar variáveis de ambiente de runtime (`GOOGLE_*`, `SKYSCANNER_*`, `SCAN_IMAGE_*`) e/ou rotas no banco (`user_routes`).
+  - Alterar variáveis de ambiente de runtime (`GOOGLE_*`, `SKYSCANNER_*`, `SCAN_IMAGE_*`) e/ou banco (`app_settings`, `user_routes`).
 - Rotação de segredos
   - Alterar `.env` (`TELEGRAM_BOT_TOKEN`, `MP_ACCESS_TOKEN`, `SKYSCANNER_SECRET_KEY`) e reiniciar processos.
 

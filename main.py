@@ -71,16 +71,12 @@ TELEGRAM_API_BASE_URL = _env_required("TELEGRAM_API_BASE_URL").rstrip("/")
 
 DEFAULT_SCAN_INTERVAL = int(CONFIG.get("full_scan_seconds", 3 * 60 * 60))
 DEFAULT_SCHEDULE_MINUTES = max(1, int(CONFIG.get("schedule_minutes", DEFAULT_SCAN_INTERVAL // 60)))
-_SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", str(DEFAULT_SCHEDULE_MINUTES)))
-SCAN_INTERVAL_SECONDS = int(
-    os.getenv("SKYSCANNER_FULL_SCAN_EVERY_SECONDS", str(max(1, _SCAN_INTERVAL_MINUTES) * 60))
-)
+DEFAULT_SCAN_INTERVAL_MINUTES = int(os.getenv("SCAN_INTERVAL_MINUTES", str(DEFAULT_SCHEDULE_MINUTES)))
 AUTO_SCAN_ENABLED = os.getenv("SKYSCANNER_AUTO_SCAN", "1") == "1"
 USER_SCAN_POLL_SECONDS = int(os.getenv("SKYSCANNER_USER_SCAN_POLL_SECONDS", "60"))
 PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
 _scan_lock = threading.Lock()
 _scan_last_run_at = None
-_user_scheduler_started = False
 SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "4.0"))
 SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.25")))
 SCAN_IMAGE_TARGET_WIDTH = max(720, int(os.getenv("SCAN_IMAGE_TARGET_WIDTH", "1280")))
@@ -507,12 +503,21 @@ def _finish_user_run(conn, run_id: int, status: str, summary: str) -> None:
     conn.commit()
 
 
-def _touch_user_cron_run(conn, user_id: int) -> None:
-    conn.execute(
-        "UPDATE user_cron SET last_run_at = ?, updated_at = COALESCE(updated_at, ?) WHERE user_id = ?",
-        (datetime.now().isoformat(), datetime.now().isoformat(), user_id),
-    )
-    conn.commit()
+def get_scheduler_settings() -> tuple[int, int, float | None]:
+    conn = sqlite3.connect(auth_db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT cron_enabled, scan_interval_minutes, max_price_display FROM app_settings WHERE id = 1"
+        ).fetchone()
+        if not row:
+            return 1, max(1, DEFAULT_SCAN_INTERVAL_MINUTES), None
+        enabled = 1 if int(row["cron_enabled"] or 0) == 1 else 0
+        interval = max(1, int(row["scan_interval_minutes"] or DEFAULT_SCAN_INTERVAL_MINUTES))
+        max_price = row["max_price_display"]
+        return enabled, interval, float(max_price) if max_price is not None else None
+    finally:
+        conn.close()
 
 
 def _user_has_running_scan(conn, user_id: int) -> bool:
@@ -534,13 +539,11 @@ def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = Tru
     conn.row_factory = sqlite3.Row
     run_id = _create_user_run(conn, user_id, trigger=trigger)
     try:
-        if trigger.startswith("agendada"):
-            _touch_user_cron_run(conn, user_id)
         routes = _build_user_routes(conn, user_id)
         if not routes:
             routes = build_db_queries(get_db_path())
         parsed = run_scan_for_routes(routes)
-        max_price = get_user_max_display_price(user_id)
+        max_price = get_global_max_price_limit()
         parsed_for_display = filter_rows_by_max_price(parsed, max_price)
         msg = build_full_scan_message(parsed_for_display, trigger=trigger)
         if notify:
@@ -561,18 +564,20 @@ def run_user_scan(user_id: int, trigger: str = "manual-user", notify: bool = Tru
 def _auto_scan_loop():
     while True:
         try:
+            enabled, interval_minutes, max_price = get_scheduler_settings()
+            if enabled != 1:
+                time.sleep(max(30, USER_SCAN_POLL_SECONDS))
+                continue
             parsed = run_full_scan()
-            max_price = get_global_max_price_limit()
             notify_full_scan(parsed, trigger="agendada", max_price=max_price)
             print(f"[auto-scan] consulta completa executada em {_scan_last_run_at}")
         except Exception as e:
             print(f"[auto-scan] erro: {e}")
-        time.sleep(SCAN_INTERVAL_SECONDS)
+        _, interval_minutes, _ = get_scheduler_settings()
+        time.sleep(max(60, interval_minutes * 60))
 
 
 def start_auto_scan_if_needed():
-    start_user_scan_scheduler_if_needed()
-
     if not AUTO_SCAN_ENABLED:
         print("[auto-scan] desativado por SKYSCANNER_AUTO_SCAN=0")
         return
@@ -584,91 +589,7 @@ def start_auto_scan_if_needed():
 
     t = threading.Thread(target=_auto_scan_loop, daemon=True)
     t.start()
-    print(f"[auto-scan] ligado: intervalo {SCAN_INTERVAL_SECONDS}s + cron por usuário")
-
-
-def _should_run_user_now(conn, user_id: int, schedule_minutes: int) -> bool:
-    if _user_has_running_scan(conn, user_id):
-        return False
-
-    row = conn.execute(
-        "SELECT last_run_at, updated_at FROM user_cron WHERE user_id = ?",
-        (user_id,),
-    ).fetchone()
-    interval_seconds = max(60, schedule_minutes * 60)
-    if row and row["last_run_at"]:
-        try:
-            last_started = datetime.fromisoformat(row["last_run_at"])
-            return (datetime.now() - last_started).total_seconds() >= interval_seconds
-        except Exception:
-            pass
-
-    fallback = conn.execute(
-        "SELECT started_at FROM user_runs WHERE user_id = ? AND trigger LIKE 'agendada%' ORDER BY id DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
-    if not fallback or not fallback["started_at"]:
-        return True
-    try:
-        last_started = datetime.fromisoformat(fallback["started_at"])
-    except Exception:
-        return True
-    return (datetime.now() - last_started).total_seconds() >= interval_seconds
-
-
-def _user_scan_scheduler_loop():
-    while True:
-        conn = sqlite3.connect(auth_db_path())
-        conn.row_factory = sqlite3.Row
-        try:
-            users = conn.execute(
-                """
-                SELECT u.id AS user_id,
-                       COALESCE(c.enabled, 1) AS enabled,
-                       c.schedule_minutes,
-                       c.every_hours
-                FROM users u
-                LEFT JOIN user_cron c ON c.user_id = u.id
-                """
-            ).fetchall()
-            for u in users:
-                if int(u["enabled"] or 0) != 1:
-                    continue
-                schedule_minutes = u["schedule_minutes"]
-                if schedule_minutes is None:
-                    fallback_hours = u["every_hours"]
-                    if fallback_hours and fallback_hours > 0:
-                        schedule_minutes = int(fallback_hours) * 60
-                    else:
-                        schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-                schedule_minutes = max(1, int(schedule_minutes))
-                if not _should_run_user_now(conn, int(u["user_id"]), schedule_minutes):
-                    continue
-                try:
-                    run_user_scan(int(u["user_id"]), trigger="agendada-usuario")
-                    print(f"[user-scan] execução usuário={u['user_id']} concluída")
-                except Exception as e:
-                    print(f"[user-scan] erro usuário={u['user_id']}: {e}")
-        finally:
-            conn.close()
-
-        time.sleep(max(30, USER_SCAN_POLL_SECONDS))
-
-
-def start_user_scan_scheduler_if_needed():
-    global _user_scheduler_started
-    if _user_scheduler_started:
-        return
-
-    is_reloader_main = os.getenv("WERKZEUG_RUN_MAIN") == "true"
-    is_debug = os.getenv("FLASK_DEBUG") == "1"
-    if is_debug and not is_reloader_main:
-        return
-
-    t = threading.Thread(target=_user_scan_scheduler_loop, daemon=True)
-    t.start()
-    _user_scheduler_started = True
-    print(f"[user-scan] scheduler ligado: verificação a cada {USER_SCAN_POLL_SECONDS}s")
+    print("[auto-scan] ligado: intervalo global pelo BD (app_settings.scan_interval_minutes)")
 
 
 def get_db_path() -> str:
@@ -979,23 +900,8 @@ def normalize_maxmilhas_history() -> int:
 
 
 def get_user_max_display_price(user_id: int | None) -> float | None:
-    if not user_id:
-        return None
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT max_price_display FROM user_cron WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if not row:
-            return None
-        value = row["max_price_display"]
-        if value is None:
-            return None
-        return float(value)
-    finally:
-        conn.close()
+    _ = user_id
+    return get_global_max_price_limit()
 
 
 def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[dict]:
@@ -1008,16 +914,8 @@ def filter_rows_by_max_price(rows: list[dict], max_price: float | None) -> list[
 
 
 def get_global_max_price_limit() -> float | None:
-    conn = sqlite3.connect(auth_db_path())
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT max_price_display FROM user_cron WHERE max_price_display IS NOT NULL"
-        ).fetchall()
-        values = [float(row["max_price_display"]) for row in rows if row["max_price_display"] is not None]
-        return min(values) if values else None
-    finally:
-        conn.close()
+    _, _, max_price = get_scheduler_settings()
+    return max_price
 
 
 def _to_route(query_args) -> RouteQuery:
@@ -1367,21 +1265,8 @@ def _ensure_user_telegram_defaults(conn, user_id: int) -> None:
     )
     conn.commit()
 
-def _ensure_user_cron_defaults(conn, user_id: int) -> None:
-    exists = conn.execute("SELECT 1 FROM user_cron WHERE user_id = ? LIMIT 1", (user_id,)).fetchone()
-    if exists:
-        return
-    schedule_minutes = DEFAULT_SCHEDULE_MINUTES
-    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
-    now = _current_iso_ts()
-    conn.execute("INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at, last_run_at) VALUES (?, 1, ?, ?, NULL, ?, ?)",
-        (user_id, every_hours, schedule_minutes, now, now),
-    )
-    conn.commit()
-
 def ensure_user_defaults(conn, user_id: int) -> None:
     _ensure_user_telegram_defaults(conn, user_id)
-    _ensure_user_cron_defaults(conn, user_id)
 
 
 
@@ -1391,6 +1276,7 @@ def ensure_user_defaults(conn, user_id: int) -> None:
 def init_auth_tables():
     db = sqlite3.connect(auth_db_path())
     cur = db.cursor()
+    cur.execute("DROP TABLE IF EXISTS user_cron")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -1429,15 +1315,12 @@ def init_auth_tables():
     )
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS user_cron (
-            user_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 1,
-            every_hours INTEGER DEFAULT 3,
-            schedule_minutes INTEGER DEFAULT 60,
+        CREATE TABLE IF NOT EXISTS app_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cron_enabled INTEGER DEFAULT 1,
+            scan_interval_minutes INTEGER DEFAULT 60,
             max_price_display REAL,
-            updated_at TEXT NOT NULL,
-            last_run_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -1456,21 +1339,29 @@ def init_auth_tables():
         """
     )
     for ddl in [
-        "ALTER TABLE user_cron ADD COLUMN last_run_at TEXT",
-        "ALTER TABLE user_cron ADD COLUMN schedule_minutes INTEGER",
-        "ALTER TABLE user_cron ADD COLUMN max_price_display REAL",
         "ALTER TABLE user_runs ADD COLUMN trigger TEXT DEFAULT 'manual-user'",
     ]:
         try:
             cur.execute(ddl)
         except sqlite3.OperationalError:
             pass
-
-    try:
-        cur.execute("UPDATE user_cron SET schedule_minutes = COALESCE(schedule_minutes, CASE WHEN every_hours > 0 THEN every_hours * 60 END, ?) WHERE schedule_minutes IS NULL", (DEFAULT_SCHEDULE_MINUTES,))
-        cur.execute("UPDATE user_cron SET every_hours = 0 WHERE schedule_minutes < 60")
-    except sqlite3.OperationalError:
-        pass
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO app_settings (id, cron_enabled, scan_interval_minutes, max_price_display, updated_at)
+        VALUES (1, 1, ?, NULL, ?)
+        """,
+        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), datetime.now().isoformat()),
+    )
+    cur.execute(
+        """
+        UPDATE app_settings
+        SET scan_interval_minutes = COALESCE(scan_interval_minutes, ?),
+            cron_enabled = COALESCE(cron_enabled, 1),
+            updated_at = COALESCE(updated_at, ?)
+        WHERE id = 1
+        """,
+        (max(1, DEFAULT_SCAN_INTERVAL_MINUTES), datetime.now().isoformat()),
+    )
 
     db.commit()
     db.close()
@@ -1626,15 +1517,13 @@ def painel():
         (user["id"],),
     ).fetchall()
     tg = db.execute("SELECT bot_token, chat_id FROM user_telegram WHERE user_id = ?", (user["id"],)).fetchone()
-    cron = db.execute("SELECT enabled, every_hours, schedule_minutes, max_price_display FROM user_cron WHERE user_id = ?", (user["id"],)).fetchone()
-    cron_minutes = DEFAULT_SCHEDULE_MINUTES
+    cron = db.execute("SELECT cron_enabled, scan_interval_minutes, max_price_display FROM app_settings WHERE id = 1").fetchone()
+    cron_minutes = max(1, DEFAULT_SCAN_INTERVAL_MINUTES)
     cron_max_price = ""
     if cron is not None:
-        schedule_minutes = cron["schedule_minutes"]
+        schedule_minutes = cron["scan_interval_minutes"]
         if schedule_minutes is not None:
-            cron_minutes = int(schedule_minutes)
-        elif cron["every_hours"] is not None:
-            cron_minutes = max(1, int(cron["every_hours"]) * 60)
+            cron_minutes = max(1, int(schedule_minutes))
         if cron["max_price_display"] is not None:
             cron_max_price = str(int(cron["max_price_display"])) if float(cron["max_price_display"]).is_integer() else str(cron["max_price_display"])
     last_run = db.execute("SELECT started_at, finished_at, status, summary FROM user_runs WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user["id"],)).fetchone()
@@ -1694,7 +1583,7 @@ def painel():
                 {% endif %}
                 <div class='row g-3 mb-3'>
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Rotas</div><div class='h4 mb-0'>{{ routes|length }}</div></div></div></div>
-                  <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Cron</div><div class='h6 mb-0'>{% if not cron or cron['enabled'] %}Ativo{% else %}Inativo{% endif %} ({{ cron_minutes }} min)</div></div></div></div>
+                  <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Cron</div><div class='h6 mb-0'>{% if not cron or cron['cron_enabled'] %}Ativo{% else %}Inativo{% endif %} ({{ cron_minutes }} min)</div></div></div></div>
                   <div class='col-md-4'><div class='card kpi'><div class='card-body'><div class='text-muted'>Última execução</div><div class='small mb-0'>{% if last_run %}{{last_run['status']}}{% else %}sem execução{% endif %}</div></div></div></div>
                 </div>
 
@@ -1993,7 +1882,7 @@ def painel():
                   <div class='card-body'>
                     <form method='post' action='{{ url_for("save_cron") }}' class='row g-2 align-items-center'>
                       <div class='col-md-2 form-check ms-2'>
-                        <input class='form-check-input' type='checkbox' name='enabled' id='enabled' {% if not cron or cron['enabled'] %}checked{% endif %}>
+                        <input class='form-check-input' type='checkbox' name='enabled' id='enabled' {% if not cron or cron['cron_enabled'] %}checked{% endif %}>
                         <label class='form-check-label' for='enabled'>Ativo</label>
                       </div>
                       <div class='col-md-3'><input class='form-control' name='schedule_minutes' type='number' min='1' max='1440' step='1' value='{{ cron_minutes }}'></div>
@@ -2190,26 +2079,23 @@ def restart_service():
 @login_required
 def save_cron():
     db = get_auth_db()
-    user = current_user()
     enabled = 1 if request.form.get("enabled") else 0
-    schedule_minutes = max(1, min(1440, int(request.form.get("schedule_minutes", DEFAULT_SCHEDULE_MINUTES))))
+    schedule_minutes = max(1, min(1440, int(request.form.get("schedule_minutes", DEFAULT_SCAN_INTERVAL_MINUTES))))
     max_price_display_raw = request.form.get("max_price_display", "").strip()
     max_price_display = None
     if max_price_display_raw:
         max_price_display = max(0.0, float(max_price_display_raw))
-    every_hours = schedule_minutes // 60 if schedule_minutes % 60 == 0 else 0
     db.execute(
         """
-        INSERT INTO user_cron (user_id, enabled, every_hours, schedule_minutes, max_price_display, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          enabled = excluded.enabled,
-          every_hours = excluded.every_hours,
-          schedule_minutes = excluded.schedule_minutes,
+        INSERT INTO app_settings (id, cron_enabled, scan_interval_minutes, max_price_display, updated_at)
+        VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          cron_enabled = excluded.cron_enabled,
+          scan_interval_minutes = excluded.scan_interval_minutes,
           max_price_display = excluded.max_price_display,
           updated_at = excluded.updated_at
         """,
-        (user["id"], enabled, every_hours, schedule_minutes, max_price_display, datetime.now().isoformat()),
+        (enabled, schedule_minutes, max_price_display, datetime.now().isoformat()),
     )
     db.commit()
     return redirect(url_for("painel", _anchor="cron"))

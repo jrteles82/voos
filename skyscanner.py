@@ -97,6 +97,61 @@ def _normalize_list(value):
     return []
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_list(name: str):
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _apply_env_overrides(config: dict) -> dict:
+    merged = dict(config)
+
+    if os.getenv("GOOGLE_ORIGIN"):
+        merged["origin"] = os.getenv("GOOGLE_ORIGIN", "").strip().upper()
+
+    for env_key, config_key in [
+        ("GOOGLE_DESTINATIONS_BR", "destinations_br"),
+        ("GOOGLE_DESTINATIONS_SA", "destinations_sa"),
+        ("GOOGLE_OUTBOUND_DATES", "outbound_dates"),
+        ("GOOGLE_INBOUND_DATES", "inbound_dates"),
+    ]:
+        env_list = _env_list(env_key)
+        if env_list is not None:
+            merged[config_key] = env_list
+
+    if os.getenv("GOOGLE_ENABLE_SOUTH_AMERICA") is not None:
+        merged["enable_south_america"] = _env_bool("GOOGLE_ENABLE_SOUTH_AMERICA", bool(merged.get("enable_south_america", False)))
+
+    for env_key, config_key, cast in [
+        ("GOOGLE_CHECK_EVERY_HOURS", "check_every_hours", int),
+        ("GOOGLE_FULL_SCAN_SECONDS", "full_scan_seconds", int),
+        ("GOOGLE_SCHEDULE_MINUTES", "schedule_minutes", int),
+        ("GOOGLE_TIMEOUT_MS", "timeout_ms", int),
+        ("GOOGLE_SETTLE_SECONDS", "settle_seconds", float),
+        ("GOOGLE_REQUEST_PAUSE_SECONDS", "request_pause_seconds", float),
+    ]:
+        raw = os.getenv(env_key)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            merged[config_key] = cast(raw.strip())
+        except ValueError:
+            pass
+
+    if os.getenv("GOOGLE_HEADLESS") is not None:
+        merged["headless"] = _env_bool("GOOGLE_HEADLESS", bool(merged.get("headless", True)))
+
+    return merged
+
+
 def _load_user_config():
     if not CONFIG_FILE.exists():
         return {}
@@ -118,6 +173,7 @@ def _load_user_config():
 
 CONFIG = dict(DEFAULT_CONFIG)
 CONFIG.update(_load_user_config())
+CONFIG = _apply_env_overrides(CONFIG)
 
 @dataclass
 class RouteQuery:

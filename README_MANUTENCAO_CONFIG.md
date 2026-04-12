@@ -76,6 +76,33 @@ Arquivo: `.env`
 - `MAXMILHAS_ORIGEM`, `MAXMILHAS_DESTINO`, `MAXMILHAS_DATA_IDA_ISO`, `MAXMILHAS_URL`
   - Onde usado: `maxmilhas.py`.
   - Para que: defaults da execução standalone do scraper.
+- `GOOGLE_ORIGIN`
+  - Onde usado: `skyscanner.py`.
+  - Para que: origem padrão do Google Flights.
+- `GOOGLE_DESTINATIONS_BR`, `GOOGLE_DESTINATIONS_SA` (CSV)
+  - Onde usado: `skyscanner.py`.
+  - Para que: destinos monitorados no Google Flights.
+- `GOOGLE_OUTBOUND_DATES`, `GOOGLE_INBOUND_DATES` (CSV de datas `YYYY-MM-DD`)
+  - Onde usado: `skyscanner.py`.
+  - Para que: datas consultadas no Google Flights.
+- `GOOGLE_ENABLE_SOUTH_AMERICA` (`1`/`0`)
+  - Onde usado: `skyscanner.py`.
+  - Para que: ativa destinos da América do Sul no Google Flights.
+- `GOOGLE_HEADLESS` (`1`/`0`)
+  - Onde usado: `skyscanner.py` e `main.py` (via `CONFIG`).
+  - Para que: execução headless do navegador para Google Flights.
+- `GOOGLE_TIMEOUT_MS` (default `45000`)
+  - Onde usado: `skyscanner.py`.
+  - Para que: timeout padrão de operações Playwright no Google Flights.
+- `GOOGLE_SETTLE_SECONDS` (default `2`)
+  - Onde usado: `skyscanner.py`.
+  - Para que: espera curta para estabilização da página antes da leitura.
+- `GOOGLE_REQUEST_PAUSE_SECONDS` (default `0.2`)
+  - Onde usado: `skyscanner.py`.
+  - Para que: pausa entre consultas para reduzir pressão no site.
+- `GOOGLE_CHECK_EVERY_HOURS`, `GOOGLE_FULL_SCAN_SECONDS`, `GOOGLE_SCHEDULE_MINUTES`
+  - Onde usado: `skyscanner.py`/`main.py` (via `CONFIG`).
+  - Para que: cadência de execução automática.
 - `MAXMILHAS_HEADLESS` (default `1`)
   - Para que: roda navegador headless no scraper MaxMilhas.
 - `MAXMILHAS_MAX_TENTATIVAS` (default `1`)

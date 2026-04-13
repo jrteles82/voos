@@ -1028,13 +1028,21 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             destination_w = draw.textlength(destination_part, font=body_font)
             route_w = origin_w + destination_w
             route_x = x0 + max(0, (col_widths[0] - route_w) / 2)
-            route_y = y + scaled(6)
+            route_y = y + scaled(4)
             draw.text((route_x, route_y), origin_part, font=body_font, fill=origin_color)
             draw.text((route_x + origin_w, route_y), destination_part, font=body_font, fill=destination_color)
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
+            vendor_box_w = col_widths[0] - scaled(16)
+            truncated_vendor = vendor_txt
+            while draw.textlength(truncated_vendor, font=small_font) > vendor_box_w and len(truncated_vendor) > 4:
+                truncated_vendor = truncated_vendor[:-2].rstrip() + '…'
+            vendor_bbox = draw.textbbox((0, 0), truncated_vendor, font=small_font)
+            vendor_w = vendor_bbox[2] - vendor_bbox[0]
+            vendor_x = x0 + max(0, (col_widths[0] - vendor_w) / 2)
+            draw.text((vendor_x, y + scaled(22)), truncated_vendor, font=small_font, fill=colors["muted"])
 
             date_col_x = x0 + col_widths[0]
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]

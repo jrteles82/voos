@@ -950,7 +950,7 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     section_h = scaled(28)
     title_h = scaled(28)
     meta_h = scaled(20)
-    col_widths = [scaled(220), scaled(150), scaled(260)]
+    col_widths = [scaled(210), scaled(140), scaled(220)]
     headers = ["Trecho", "Data", "Preço"]
     total_rows = sum(len(items) for _, items in groups)
     # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.

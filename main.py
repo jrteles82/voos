@@ -946,12 +946,12 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
 
     padding_x = scaled(14)
     padding_y = scaled(12)
-    row_h = scaled(32)
+    row_h = scaled(46)
     section_h = scaled(30)
     title_h = scaled(28)
     meta_h = scaled(22)
     col_widths = [scaled(126), scaled(104), scaled(132), scaled(190)]
-    headers = ["Rota", "Data voo", "Preço", "Onde comprar mais barato"]
+    headers = ["Rota", "Data", "Preço", "Onde comprar"]
     total_rows = sum(len(items) for _, items in groups)
     # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.
     extra_rows = 0
@@ -997,7 +997,7 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     for idx, header in enumerate(headers):
         w = col_widths[idx]
         draw.rectangle([x, y, x + w, y + row_h], fill=colors["header_bg"], outline=colors["border"])
-        draw.text((x + scaled(10), y + scaled(9)), header, font=header_font, fill=colors["text"])
+        draw.text((x + scaled(8), y + scaled(7)), header, font=header_font, fill=colors["text"])
         x += w
     y += row_h
 
@@ -1020,38 +1020,38 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             origin_color = _airport_code_color(origin_txt, colors["text"])
             destination_color = _airport_code_color(destination_txt, colors["text"])
             origin_part = f"{origin_txt} → "
-            draw.text((x0 + scaled(10), y + scaled(9)), origin_part, font=body_font, fill=origin_color)
-            dest_x = int(x0 + scaled(10) + draw.textlength(origin_part, font=body_font))
-            draw.text((dest_x, y + scaled(9)), destination_txt, font=body_font, fill=destination_color)
+            draw.text((x0 + scaled(8), y + scaled(6)), origin_part, font=body_font, fill=origin_color)
+            dest_x = int(x0 + scaled(8) + draw.textlength(origin_part, font=body_font))
+            draw.text((dest_x, y + scaled(6)), destination_txt, font=body_font, fill=destination_color)
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
-            date_x = x0 + col_widths[0] + scaled(10)
+            date_x = x0 + col_widths[0] + scaled(8)
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
             badge_bbox = draw.textbbox((0, 0), date_txt, font=small_font)
-            badge_w = (badge_bbox[2] - badge_bbox[0]) + scaled(16)
+            badge_w = (badge_bbox[2] - badge_bbox[0]) + scaled(14)
             draw.rounded_rectangle(
-                [date_x, y + scaled(7), date_x + badge_w, y + scaled(28)],
-                radius=scaled(8),
+                [date_x, y + scaled(5), date_x + badge_w, y + scaled(22)],
+                radius=scaled(7),
                 fill=badge_fill,
             )
-            draw.text((date_x + scaled(8), y + scaled(10)), date_txt, font=small_font, fill=colors["text"])
+            draw.text((date_x + scaled(6), y + scaled(7)), date_txt, font=small_font, fill=colors["text"])
 
-            price_x = x0 + col_widths[0] + col_widths[1] + scaled(10)
-            price_box_w = col_widths[2] - scaled(16)
+            price_x = x0 + col_widths[0] + col_widths[1] + scaled(8)
+            price_box_w = col_widths[2] - scaled(12)
             truncated_price = price_txt
             while draw.textlength(truncated_price, font=header_font) > price_box_w and len(truncated_price) > 4:
                 truncated_price = truncated_price[:-1]
-            draw.text((price_x, y + scaled(8)), truncated_price, font=header_font, fill=colors["price"])
+            draw.text((price_x, y + scaled(6)), truncated_price, font=header_font, fill=colors["price"])
 
-            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(8)
-            vendor_box_w = col_widths[3] - scaled(16)
+            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(6)
+            vendor_box_w = col_widths[3] - scaled(10)
             truncated_vendor = vendor_txt
             while draw.textlength(truncated_vendor, font=body_font) > vendor_box_w and len(truncated_vendor) > 4:
                 truncated_vendor = truncated_vendor[:-2].rstrip() + '…'
-            draw.text((vendor_x, y + scaled(8)), truncated_vendor, font=body_font, fill=colors["text"])
+            draw.text((vendor_x, y + scaled(6)), truncated_vendor, font=body_font, fill=colors["text"])
             y += row_h
 
         if group_idx != len(groups) - 1:

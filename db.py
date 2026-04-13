@@ -5,13 +5,15 @@ import re
 import sqlite3 as _sqlite3
 from typing import Any
 
-DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").strip().lower()
-
 Row = _sqlite3.Row
 Connection = _sqlite3.Connection
 Cursor = _sqlite3.Cursor
 OperationalError = _sqlite3.OperationalError
 IntegrityError = _sqlite3.IntegrityError
+
+
+def _db_engine() -> str:
+    return os.getenv("DB_ENGINE", "sqlite").strip().lower()
 
 
 class _RowProxy:
@@ -119,7 +121,7 @@ class _MySQLConnectionWrapper:
 
 
 def connect(path: str | None = None):
-    if DB_ENGINE != "mysql":
+    if _db_engine() != "mysql":
         return _sqlite3.connect(path or "")
 
     try:

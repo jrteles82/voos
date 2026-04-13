@@ -103,6 +103,10 @@ class _MySQLConnectionWrapper:
         cur.execute(query, tuple(params or ()))
         return _MySQLCursorWrapper(cur, self.row_factory)
 
+    def cursor(self):
+        cur = self._conn.cursor()
+        return _MySQLCursorWrapper(cur, self.row_factory)
+
     def executemany(self, sql: str, seq_of_params):
         cur = self._conn.cursor()
         query = self._normalize_sql(sql)

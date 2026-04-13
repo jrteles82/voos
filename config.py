@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 from datetime import datetime
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    from backports.zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"

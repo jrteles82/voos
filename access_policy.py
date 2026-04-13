@@ -1,4 +1,4 @@
-import sqlite3
+import db as sqlite3
 from datetime import datetime
 
 from config import (

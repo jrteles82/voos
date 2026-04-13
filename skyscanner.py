@@ -37,7 +37,7 @@ import argparse
 import json
 import os
 import re
-import sqlite3
+import db as sqlite3
 import sys
 import time
 from dataclasses import dataclass

@@ -1,4 +1,4 @@
-import sqlite3
+import db as sqlite3
 db = "/home/teles/dev/python/skyscanner-bot/flight_tracker_browser.db"
 conn = sqlite3.connect(db)
 c = conn.cursor()

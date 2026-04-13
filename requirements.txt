@@ -3,3 +3,5 @@ requests>=2.31,<3
 playwright>=1.52,<2
 Pillow>=10,<12
 python-telegram-bot>=21,<22
+
+pymysql>=1.1,<2

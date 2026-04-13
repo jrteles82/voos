@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
-import sqlite3
+import db as sqlite3
 import time
 from datetime import datetime
 

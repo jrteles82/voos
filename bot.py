@@ -1,4 +1,4 @@
-import sqlite3
+import db as sqlite3
 import uuid
 import requests
 from datetime import datetime

@@ -13,7 +13,7 @@ import time
 import random
 import requests
 import threading
-import sqlite3
+import db as sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from datetime import datetime

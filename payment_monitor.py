@@ -1,6 +1,6 @@
 import asyncio
 import os
-import sqlite3
+import db as sqlite3
 import time
 from datetime import datetime, timedelta
 

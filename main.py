@@ -946,10 +946,10 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
 
     padding_x = scaled(14)
     padding_y = scaled(12)
-    row_h = scaled(58)
-    section_h = scaled(30)
+    row_h = scaled(42)
+    section_h = scaled(28)
     title_h = scaled(28)
-    meta_h = scaled(22)
+    meta_h = scaled(20)
     col_widths = [scaled(220), scaled(150), scaled(190)]
     headers = ["Trecho", "Data", "Preço"]
     total_rows = sum(len(items) for _, items in groups)
@@ -997,7 +997,10 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     for idx, header in enumerate(headers):
         w = col_widths[idx]
         draw.rectangle([x, y, x + w, y + row_h], fill=colors["header_bg"], outline=colors["border"])
-        draw.text((x + scaled(8), y + scaled(7)), header, font=header_font, fill=colors["text"])
+        header_bbox = draw.textbbox((0, 0), header, font=header_font)
+        header_w = header_bbox[2] - header_bbox[0]
+        header_h = header_bbox[3] - header_bbox[1]
+        draw.text((x + (w - header_w) / 2, y + (row_h - header_h) / 2 - scaled(1)), header, font=header_font, fill=colors["text"])
         x += w
     y += row_h
 
@@ -1019,37 +1022,44 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             destination_txt = (row.get("destination") or "").upper()
             origin_color = _airport_code_color(origin_txt, colors["text"])
             destination_color = _airport_code_color(destination_txt, colors["text"])
-            origin_part = f"{origin_txt} → "
-            draw.text((x0 + scaled(8), y + scaled(5)), origin_part, font=body_font, fill=origin_color)
-            dest_x = int(x0 + scaled(8) + draw.textlength(origin_part, font=body_font))
-            draw.text((dest_x, y + scaled(5)), destination_txt, font=body_font, fill=destination_color)
+            route_txt = f"{origin_txt} → {destination_txt}"
+            route_bbox = draw.textbbox((0, 0), route_txt, font=body_font)
+            route_w = route_bbox[2] - route_bbox[0]
+            route_x = x0 + max(0, (col_widths[0] - route_w) / 2)
+            draw.text((route_x, y + scaled(8)), route_txt, font=body_font, fill=colors["text"])
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
-            date_x = x0 + col_widths[0] + scaled(8)
+            date_col_x = x0 + col_widths[0]
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
             badge_bbox = draw.textbbox((0, 0), date_txt, font=small_font)
             badge_w = min(col_widths[1] - scaled(12), (badge_bbox[2] - badge_bbox[0]) + scaled(14))
+            date_x = date_col_x + max(0, (col_widths[1] - badge_w) / 2)
             draw.rounded_rectangle(
-                [date_x, y + scaled(5), date_x + badge_w, y + scaled(22)],
+                [date_x, y + scaled(8), date_x + badge_w, y + scaled(24)],
                 radius=scaled(7),
                 fill=badge_fill,
             )
-            draw.text((date_x + scaled(6), y + scaled(7)), date_txt, font=small_font, fill=colors["text"])
+            text_bbox = draw.textbbox((0, 0), date_txt, font=small_font)
+            text_h = text_bbox[3] - text_bbox[1]
+            draw.text((date_x + (badge_w - (text_bbox[2] - text_bbox[0])) / 2, y + scaled(8) + (scaled(16) - text_h) / 2 - 1), date_txt, font=small_font, fill=colors["text"])
 
-            price_x = x0 + col_widths[0] + col_widths[1] + scaled(8)
+            price_col_x = x0 + col_widths[0] + col_widths[1]
             price_box_w = col_widths[2] - scaled(12)
             truncated_price = price_txt
             while draw.textlength(truncated_price, font=header_font) > price_box_w and len(truncated_price) > 4:
                 truncated_price = truncated_price[:-1]
-            draw.text((price_x, y + scaled(5)), truncated_price, font=header_font, fill=colors["price"])
+            price_bbox = draw.textbbox((0, 0), truncated_price, font=header_font)
+            price_w = price_bbox[2] - price_bbox[0]
+            price_h = price_bbox[3] - price_bbox[1]
+            draw.text((price_col_x + (col_widths[2] - price_w) / 2, y + (row_h - price_h) / 2 - scaled(1)), truncated_price, font=header_font, fill=colors["price"])
 
             y += row_h
 
         if group_idx != len(groups) - 1:
-            y += scaled(8)
+            y += scaled(4)
     final_height = y + padding_y
     cropped = image.crop((0, 0, width, final_height))
 

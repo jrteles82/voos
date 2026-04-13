@@ -1022,11 +1022,14 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             destination_txt = (row.get("destination") or "").upper()
             origin_color = _airport_code_color(origin_txt, colors["text"])
             destination_color = _airport_code_color(destination_txt, colors["text"])
-            route_txt = f"{origin_txt} → {destination_txt}"
-            route_bbox = draw.textbbox((0, 0), route_txt, font=body_font)
-            route_w = route_bbox[2] - route_bbox[0]
+            origin_part = f"{origin_txt} → "
+            destination_part = destination_txt
+            origin_w = draw.textlength(origin_part, font=body_font)
+            destination_w = draw.textlength(destination_part, font=body_font)
+            route_w = origin_w + destination_w
             route_x = x0 + max(0, (col_widths[0] - route_w) / 2)
-            draw.text((route_x, y + scaled(8)), route_txt, font=body_font, fill=colors["text"])
+            draw.text((route_x, y + scaled(8)), origin_part, font=body_font, fill=origin_color)
+            draw.text((route_x + origin_w, y + scaled(8)), destination_part, font=body_font, fill=destination_color)
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))

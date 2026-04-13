@@ -950,7 +950,7 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     section_h = scaled(28)
     title_h = scaled(28)
     meta_h = scaled(20)
-    col_widths = [scaled(220), scaled(150), scaled(190)]
+    col_widths = [scaled(220), scaled(150), scaled(260)]
     headers = ["Trecho", "Data", "Preço"]
     total_rows = sum(len(items) for _, items in groups)
     # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.
@@ -1035,14 +1035,6 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
-            vendor_box_w = col_widths[0] - scaled(16)
-            truncated_vendor = vendor_txt
-            while draw.textlength(truncated_vendor, font=small_font) > vendor_box_w and len(truncated_vendor) > 4:
-                truncated_vendor = truncated_vendor[:-2].rstrip() + '…'
-            vendor_bbox = draw.textbbox((0, 0), truncated_vendor, font=small_font)
-            vendor_w = vendor_bbox[2] - vendor_bbox[0]
-            vendor_x = x0 + max(0, (col_widths[0] - vendor_w) / 2)
-            draw.text((vendor_x, y + scaled(22)), truncated_vendor, font=small_font, fill=colors["muted"])
 
             date_col_x = x0 + col_widths[0]
             badge_fill = colors["date_badge_return"] if title.startswith("VOLTAS") else colors["date_badge"]
@@ -1059,14 +1051,15 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             draw.text((date_x + (badge_w - (text_bbox[2] - text_bbox[0])) / 2, y + scaled(8) + (scaled(16) - text_h) / 2 - 1), date_txt, font=small_font, fill=colors["text"])
 
             price_col_x = x0 + col_widths[0] + col_widths[1]
-            price_box_w = col_widths[2] - scaled(12)
-            truncated_price = price_txt
-            while draw.textlength(truncated_price, font=header_font) > price_box_w and len(truncated_price) > 4:
-                truncated_price = truncated_price[:-1]
-            price_bbox = draw.textbbox((0, 0), truncated_price, font=header_font)
-            price_w = price_bbox[2] - price_bbox[0]
-            price_h = price_bbox[3] - price_bbox[1]
-            draw.text((price_col_x + (col_widths[2] - price_w) / 2, y + (row_h - price_h) / 2 - scaled(1)), truncated_price, font=header_font, fill=colors["price"])
+            price_box_w = col_widths[2] - scaled(16)
+            vendor_price_txt = f"{vendor_txt} ({price_txt})"
+            truncated_vendor_price = vendor_price_txt
+            while draw.textlength(truncated_vendor_price, font=body_font) > price_box_w and len(truncated_vendor_price) > 4:
+                truncated_vendor_price = truncated_vendor_price[:-2].rstrip() + '…'
+            vp_bbox = draw.textbbox((0, 0), truncated_vendor_price, font=body_font)
+            vp_w = vp_bbox[2] - vp_bbox[0]
+            vp_h = vp_bbox[3] - vp_bbox[1]
+            draw.text((price_col_x + (col_widths[2] - vp_w) / 2, y + (row_h - vp_h) / 2 - scaled(1)), truncated_vendor_price, font=body_font, fill=colors["text"])
 
             y += row_h
 

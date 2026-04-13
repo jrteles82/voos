@@ -1033,7 +1033,6 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             draw.text((route_x + origin_w, route_y), destination_part, font=body_font, fill=destination_color)
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
-            price_txt = row.get("price_fmt") or format_brl(row.get("price"))
             vendor_txt = _best_vendor_label(row)
 
             date_col_x = x0 + col_widths[0]
@@ -1052,8 +1051,7 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
 
             price_col_x = x0 + col_widths[0] + col_widths[1]
             price_box_w = col_widths[2] - scaled(16)
-            vendor_price_txt = f"{vendor_txt} ({price_txt})"
-            truncated_vendor_price = vendor_price_txt
+            truncated_vendor_price = vendor_txt
             while draw.textlength(truncated_vendor_price, font=body_font) > price_box_w and len(truncated_vendor_price) > 4:
                 truncated_vendor_price = truncated_vendor_price[:-2].rstrip() + '…'
             vp_bbox = draw.textbbox((0, 0), truncated_vendor_price, font=body_font)

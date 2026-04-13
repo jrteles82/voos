@@ -1,3 +1,4 @@
+from __future__ import annotations
 import db as sqlite3
 import uuid
 import requests

@@ -89,7 +89,7 @@ PANEL_RESTART_COMMAND = os.getenv("SKYSCANNER_RESTART_COMMAND", "").strip()
 _scan_lock = threading.Lock()
 _scan_last_run_at = None
 SCAN_IMAGE_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_MAX_ASPECT", "4.0"))
-SCAN_IMAGE_SCALE = max(1.0, float(os.getenv("SCAN_IMAGE_SCALE", "1.0")))
+SCAN_IMAGE_SCALE = max(0.85, float(os.getenv("SCAN_IMAGE_SCALE", "0.9")))
 SCAN_IMAGE_TARGET_WIDTH = max(720, int(os.getenv("SCAN_IMAGE_TARGET_WIDTH", "1280")))
 SCAN_IMAGE_TELEGRAM_MAX_ASPECT = float(os.getenv("SCAN_IMAGE_TELEGRAM_MAX_ASPECT", "2.10"))
 SCHEDULER_SEND_COOLDOWN_SECONDS = int(os.getenv("SCHEDULER_SEND_COOLDOWN_SECONDS", "1700"))
@@ -945,12 +945,12 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     small_font = _load_font(scaled(14))
 
     padding_x = scaled(14)
-    padding_y = scaled(14)
-    row_h = scaled(36)
-    section_h = scaled(34)
-    title_h = scaled(30)
-    meta_h = scaled(24)
-    col_widths = [scaled(170), scaled(130), scaled(125), scaled(290)]
+    padding_y = scaled(12)
+    row_h = scaled(32)
+    section_h = scaled(30)
+    title_h = scaled(28)
+    meta_h = scaled(22)
+    col_widths = [scaled(132), scaled(108), scaled(102), scaled(210)]
     headers = ["Rota", "Data voo", "Preço", "Onde comprar mais barato"]
     total_rows = sum(len(items) for _, items in groups)
     # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.
@@ -1042,8 +1042,8 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             price_x = x0 + col_widths[0] + col_widths[1] + scaled(10)
             draw.text((price_x, y + scaled(9)), price_txt, font=header_font, fill=colors["price"])
 
-            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(10)
-            draw.text((vendor_x, y + scaled(9)), vendor_txt[:34], font=body_font, fill=colors["text"])
+            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(8)
+            draw.text((vendor_x, y + scaled(8)), vendor_txt[:22], font=body_font, fill=colors["text"])
             y += row_h
 
         if group_idx != len(groups) - 1:

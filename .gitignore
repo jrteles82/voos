@@ -1,1 +1,15 @@
 .vercel
+.vercel
+.venv/
+.playwright-browsers/
+__pycache__/
+*.pyc
+.env
+*.db
+.vercel
+.venv/
+.playwright-browsers/
+__pycache__/
+*.pyc
+.env
+*.db

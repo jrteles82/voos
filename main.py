@@ -950,8 +950,8 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
     section_h = scaled(30)
     title_h = scaled(28)
     meta_h = scaled(22)
-    col_widths = [scaled(150), scaled(120), scaled(140), scaled(150)]
-    headers = ["Rota", "Data", "Preço", "Onde comprar"]
+    col_widths = [scaled(220), scaled(150), scaled(190)]
+    headers = ["Trecho", "Data", "Preço"]
     total_rows = sum(len(items) for _, items in groups)
     # Mantém o quadro mais próximo do conteúdo real, como no layout aprovado.
     extra_rows = 0
@@ -1045,13 +1045,6 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             while draw.textlength(truncated_price, font=header_font) > price_box_w and len(truncated_price) > 4:
                 truncated_price = truncated_price[:-1]
             draw.text((price_x, y + scaled(5)), truncated_price, font=header_font, fill=colors["price"])
-
-            vendor_x = x0 + col_widths[0] + col_widths[1] + col_widths[2] + scaled(8)
-            vendor_box_w = col_widths[3] - scaled(14)
-            truncated_vendor = vendor_txt
-            while draw.textlength(truncated_vendor, font=body_font) > vendor_box_w and len(truncated_vendor) > 4:
-                truncated_vendor = truncated_vendor[:-2].rstrip() + '…'
-            draw.text((vendor_x, y + scaled(5)), truncated_vendor, font=body_font, fill=colors["text"])
 
             y += row_h
 

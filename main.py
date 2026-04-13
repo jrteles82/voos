@@ -1053,8 +1053,6 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
                 truncated_vendor = truncated_vendor[:-2].rstrip() + '…'
             draw.text((vendor_x, y + scaled(5)), truncated_vendor, font=body_font, fill=colors["text"])
 
-            secondary_y = y + scaled(30)
-            draw.text((x0 + scaled(8), secondary_y), f"Trecho {item_idx + 1}", font=small_font, fill=colors["muted"])
             y += row_h
 
         if group_idx != len(groups) - 1:

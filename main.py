@@ -1028,8 +1028,9 @@ def build_scan_results_image(rows: list[dict], trigger: str | None = None) -> st
             destination_w = draw.textlength(destination_part, font=body_font)
             route_w = origin_w + destination_w
             route_x = x0 + max(0, (col_widths[0] - route_w) / 2)
-            draw.text((route_x, y + scaled(8)), origin_part, font=body_font, fill=origin_color)
-            draw.text((route_x + origin_w, y + scaled(8)), destination_part, font=body_font, fill=destination_color)
+            route_y = y + scaled(6)
+            draw.text((route_x, route_y), origin_part, font=body_font, fill=origin_color)
+            draw.text((route_x + origin_w, route_y), destination_part, font=body_font, fill=destination_color)
 
             date_txt = format_date_display(str(row.get("outbound_date") or ""))
             price_txt = row.get("price_fmt") or format_brl(row.get("price"))
